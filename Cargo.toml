@@ -1,0 +1,24 @@
+[package]
+name = "jev-game-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A native Rust engine for observable, latency-aware AI game control."
+repository = "https://github.com/King4s/jev-game-engine"
+default-run = "jev-game-engine"
+
+[dependencies]
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+azalea = { git = "https://github.com/azalea-rs/azalea", rev = "b65fa8cf1bb957976cefa926b9b500d44767d806" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "accesskit", "__screenshot"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0

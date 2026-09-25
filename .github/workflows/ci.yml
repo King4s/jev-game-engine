@@ -1,0 +1,29 @@
+name: Rust checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --check
+      - name: Check
+        run: cargo check --locked
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Offline tests
+        run: cargo test --locked

@@ -1,0 +1,37 @@
+{
+  "goal": "Build a Rust AI Game Engine and native Rust desktop UI for Windows. Minecraft Java is the first real game adapter, controlled by TypeSafe Jev. Farming Simulator 25 is the next documented adapter, not this MVP. No 2048 or Snake, no TypeScript engine. Use Rust egui/eframe UI and native Rust Minecraft protocol client (Azalea with pinned compatible toolchain/version). A clearly labelled deterministic Minecraft fixture is allowed for offline tests only. Follow revised tasks/plan.md. User refinement: reusable for other people, not personal-only. Jev selects multi-second goals, Rust executes locally. Adapt decision cadence and bounded goal duration from measured end-to-end latency so low- and high-latency users can benefit; show actual latency and responsibility clearly.",
+  "acceptance": [
+    "A documented cargo command starts the Rust desktop app with English game/session controls, start/pause/step/stop, connection settings, observed-world map, model decision panel and event timeline. Rust owns the engine, provider, adapter and UI; no Node or TypeScript runtime is required.",
+    "Live Jev uses the documented TypeSafe HTTP API with validation of bounded choices, probabilities/confidence/usage. Missing key, malformed responses, timeout and budget limits are visible; offline fixtures never masquerade as live Jev. Secrets stay out of logs, saved runs and UI.",
+    "A native Rust Minecraft adapter uses actual Azalea APIs with a pinned compatible Minecraft Java version and toolchain. It reads position, health, inventory and nearby observed entities/blocks and executes bounded actions with cancellation. Only loopback test servers are supported initially. No existing worlds, game installations, credentials or accounts are changed automatically.",
+    "Pause/stop/reset/disconnect invalidate pending model answers and release movement. Expired or obsolete responses cannot act. Sessions persist correlated observation/decision/action events; replay uses recorded telemetry and makes zero provider or Minecraft calls. External-world physics are not claimed deterministic.",
+    "cargo test, cargo check and cargo clippy --all-targets -- -D warnings pass with meaningful offline tests for provider validation, stale-answer races, budgets, adapter action bounds, persistence and replay. Native UI receives render/runtime smoke verification. Live Jev and Minecraft behavior are tested when prerequisites exist; exact missing prerequisites are documented honestly otherwise.",
+    "Independent fresh review checks acceptance and evidence, including responsive readable UI, unambiguous demo/live/replay labels and documented setup/limitations. README explains compatible Minecraft server setup, API key configuration and the next Farming Simulator 25 phase.",
+    "Latency policy adapts bounded goal/replan horizons to measured response times; low/high-latency offline tests verify bounds, freshness and immediate local stop. Settings contain no hardcoded personal paths. This is a reusable desktop MVP, not a hosted multi-user service."
+  ],
+  "workdir": ".",
+  "checks": [
+    "cargo test",
+    "cargo check",
+    "cargo clippy --all-targets -- -D warnings"
+  ],
+  "jev_model": "jev-latest",
+  "jev_done_threshold": 0.8,
+  "max_turns": 40,
+  "max_consecutive_failures": 6,
+  "check_timeout": 900,
+  "roles": {
+    "build": {
+      "when": "Implementation or required UI/documentation is missing relative to the goal",
+      "brief": "Implement one coherent vertical slice of working product. Delegate bounded independent components to subagents if useful, with explicit file ownership. Write implementation and documentation but do not write tests. Do not run configured checks; loop server runs them."
+    },
+    "test": {
+      "when": "Tests are missing or do not cover acceptance criteria",
+      "brief": "Write meaningful tests and test configuration for acceptance criteria, including deterministic offline provider/adapter fixtures and browser flows. Do not change product implementation. Do not run configured checks; loop server runs them."
+    },
+    "fix": {
+      "when": "Checks or review fail with concrete errors or gaps",
+      "brief": "Read check/review evidence and fix root causes with focused changes, using bounded subagents if helpful. Preserve truthful separation of demo and live behavior. Do not run configured checks; loop server runs them."
+    }
+  }
+}

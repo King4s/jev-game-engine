@@ -1,0 +1,24 @@
+# Focused reuse assessment
+
+Inspected 2026-09-25 following the user's instruction to reuse existing projects when doing so costs less than writing an equivalent component. This updates the broad inspiration inventory in `research.md`; it does not authorize a rewrite or additional games. No external source code was copied.
+
+## Recommended reuse
+
+| Source and verified availability | Concrete reuse in this Rust engine | Cost and decision |
+|---|---|---|
+| [tsai-sc controller](https://github.com/phyous/tsai-sc/blob/6046ecc60156c4a3c04d384b41821a4ff08501b7/tsai_sc/controller.py), Python, [MIT](https://github.com/phyous/tsai-sc/blob/6046ecc60156c4a3c04d384b41821a4ff08501b7/LICENSE) | `verify_command` distinguishes dispatch from observed game acceptance and checks actor generation. Adopt that evidence model: queued, adapter accepted, then observed displacement/arrival. A successful channel send or scheduled path is not proof of movement. | Small conceptual adaptation to existing events and observations; highest value. Typed acknowledgements and world epochs now cover the first boundary. Next reuse candidate is measured progress plus bounded execution feedback in the next normal Jev request. Do not add a separate model call for this. |
+| [tsai-sc verifier](https://github.com/phyous/tsai-sc/blob/6046ecc60156c4a3c04d384b41821a4ff08501b7/tsai_sc/verify.py), same license | Evidence-based run summaries, including rejected attempts and unavailable usage. | Existing recording validation already covers part of this. Extend only when adding outcome claims; its StarCraft input rules and paused simulation cannot validate Minecraft. Keep MIT attribution if translating substantial code. |
+| [PlayJev environment](https://github.com/OmniJev/PlayJev/blob/ea3a514d2fcbc0756c36eabe052439db54544542/playjev/env.py), Python/Playwright, [Apache-2.0](https://github.com/OmniJev/PlayJev/blob/ea3a514d2fcbc0756c36eabe052439db54544542/LICENSE) | Small environment contract and explicit distinction between natural completion and budget truncation. | Reuse the contract idea when a second adapter is actually added. Current Rust adapter and session budgets already provide the relevant boundary. Porting its browser driver adds dependencies without helping native Minecraft. Its separate pixel model is not the TypeSafe Jev provider. Bundled games have additional individual licenses. |
+| [jev-playground move implementation](https://github.com/hegargarcia/jev-playground/blob/c144bb6d99600eb506dc29133fe780cc88eb5645/src/lib/ai-move.ts), TypeScript, public source; no repository license found in the inspected tree/API metadata | Legal actions come from the game; unknown selections fail; unavailable probabilities/confidence remain null. Candidate descriptions identify concrete consequences. | Keep our independently implemented validation and truthful metrics. Improve waypoint descriptions using actual target coordinates and observed terrain, if evaluation demonstrates a benefit. Do not copy its implementation without a verified permission basis. |
+
+## Implementation choice
+
+Retain Azalea for native protocol, world state, physics and pathfinding, and reuse the existing Rust provider, recorder and UI. Replacing these with a Python/TypeScript/browser harness would introduce another runtime and still require Minecraft lifecycle and movement integration. This is an integration-cost judgment, not a measured performance claim.
+
+The immediate useful pattern is **verify execution from subsequent game observations and feed concise failure evidence into the next already-budgeted decision**. That directly addresses accepted routes that produce no movement. A bounded local progress check is cheaper and more reliable than asking Jev whether coordinates changed. Keep dispatch, acceptance, progress, arrival and timeout as distinct evidence.
+
+Prefer inspecting the specific relevant function and license before adding a component. Stop researching when a short native implementation has lower integration and validation cost. No external code or additional dependency was introduced.
+
+## Small implementation adopted
+
+The earlier research noted connection reuse in Animal Tournament. Applied that general pattern with the existing `reqwest` dependency: `src/provider.rs` now caches one HTTP client using `OnceLock`, allowing connection pooling across decisions. Redirects remain disabled; bearer credentials and the complete-request timeout remain per request. This avoids constructing a fresh pool for every decision. Actual latency improvement has not been measured. [Official reqwest client guidance](https://docs.rs/reqwest/latest/reqwest/struct.Client.html) recommends client reuse; [request timeout documentation](https://docs.rs/reqwest/latest/reqwest/struct.RequestBuilder.html#method.timeout) specifies that the timeout covers response-body completion. This is an independent short Rust implementation, not copied project code.
