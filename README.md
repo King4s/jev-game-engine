@@ -44,6 +44,8 @@ cargo run -- --live-preview --port 25565 --bot JevBot
 
 Inspect the connection and observations before starting the agent. The bot is a **separate player**. To watch it in 3D, join the same server/world using a normal Minecraft client and your own account. The engine map is sampled telemetry, not a video feed or complete world map.
 
+For Creative-mode testing, a server operator can run `minecraft:gamemode creative JevBot` after the bot has joined its target world. Multiworld plugins may apply a world's game mode during a transfer, so verify the mode after teleportation has finished. The engine does not change game modes or server permissions automatically.
+
 An independently managed SSH tunnel can expose an authorized remote backend on loopback. Use `--legacy-forwarding` only when that backend explicitly requires it and authorizes the bot. The forwarded UUID derives from the configured bot name; arbitrary identity override is not supported. Close previous previews before reconnecting the same identity.
 
 ### TypeSafe key
