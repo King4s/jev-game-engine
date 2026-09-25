@@ -25,3 +25,17 @@ A completed model-selected navigation target remains unproven. Mining, building,
 An independent read-only review examined the source and acceptance evidence. It identified manual-target binding, acceptance timing, acknowledgement rollback and replay-history gaps; fixes received regression coverage. The final re-review returned no remaining findings. This review does not establish reliable autonomous gameplay or replace broader field testing.
 
 The engine does not automatically change server configuration, player accounts or existing world files. Separate operator-authorized world conversion work was outside the application.
+
+## Acceptance map
+
+| MVP requirement | Evidence |
+|---|---|
+| Native English Rust UI and session controls | Native rendered screenshots; UI and engine regression tests; documented Cargo launch command. |
+| Validated live Jev integration | Production API responses on actual Minecraft observations; malformed-response, timeout and missing-key tests. |
+| Real bounded Minecraft adapter | Pinned Azalea connection, real observations, acknowledged wait and separately measured local navigation/stop. |
+| Cancellation, stale-answer rejection and replay | Generation/world/deadline regressions, cancelled acknowledgement rollback, immutable replay and full-history tests. |
+| Automated checks and runtime evidence | 69 tests, compilation and warning-free Clippy passed; fixture and live runtime evidence are distinguished above. |
+| Independent review and handoff | Independent final verdict: no remaining findings; README, architecture, screenshots, credits and public source published. |
+| Adaptive latency and reusable configuration | Bounded low/high-latency tests, current manual-choice refresh and settings without personal paths. |
+
+The original planning checklist in `todo.md` is retained as planning history; this report is the current implementation evidence. Future adapters and reliable autonomous task completion remain outside this MVP's demonstrated capabilities.

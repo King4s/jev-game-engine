@@ -68,7 +68,7 @@ The 12 tasks in todo.md begin with integration/UI decisions and an early connect
 
 Subagents may research Minecraft, UI and the provider in parallel. Coordinate shared contracts and assign bounded file ownership. The Jev loop selects the next task; independent review checks changes and acceptance. Checkpoints require evidence rather than routine repeated user confirmation.
 
-After MVP, investigate FS25's documented Lua mod bridge and Rust transport in a separate test save. Minecraft results do not prove FS25 compatibility. ETS2 and shapez remain later candidates from the user's library.
+After MVP, investigate FS25's documented Lua mod bridge and Rust transport in a separate test save. Minecraft results do not prove FS25 compatibility. ETS2 and shapez remain later integration candidates.
 
 ## Approved approach to 300 ms latency
 
