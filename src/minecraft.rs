@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     adapter::{ActionRequest, AdapterCommand, AdapterHandle, execute_and_acknowledge},
+    engine::REJECTED_AFTER_HIT,
     model::{Candidate, Landmark, Observation, Position, Settings},
 };
 
@@ -183,7 +184,7 @@ async fn run(
                         if observation.health > 0.0 && hurt && fleeing && deadline.is_some() {
                             note = "Damage during a flight goal; movement continues.".into();
                         } else if observation.health <= 0.0 || hurt {
-                            reject_deferred(&mut deferred, "Health decreased before action acceptance");
+                            reject_deferred(&mut deferred, REJECTED_AFTER_HIT);
                             stop(bot);
                             deadline = None;
                             fleeing = false;

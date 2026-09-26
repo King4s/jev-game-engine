@@ -24,6 +24,9 @@ pub const HEALTH_DECREASED: &str = "Health decreased: local stop without waiting
 /// Recorded when the adapter reports a death (or an observation shows no health left).
 /// It ends a session: the respawned bot is somewhere else with nothing it had.
 pub const BOT_DIED: &str = "Bot died: local stop; the session ends";
+/// The adapter's reason for refusing an action that was still awaiting acceptance when a
+/// hit arrived. With the safety reflex on, it is recorded and the session keeps going.
+pub const REJECTED_AFTER_HIT: &str = "Health decreased before action acceptance";
 
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -244,6 +247,12 @@ impl Session {
             decision,
             arrival,
         });
+    }
+
+    /// The operator opted into the safety reflex and a paced loop is running: hits are
+    /// survived and recorded instead of being a local stop.
+    fn reflex_session(&self) -> bool {
+        self.settings.safety_reflex && (self.continuous || self.one_step)
     }
 
     fn fail(&mut self, message: impl Into<String>) {
@@ -526,7 +535,7 @@ impl Session {
                     self.event("disconnect", observation.note, vec![], None);
                     return;
                 }
-                if hurt && self.settings.safety_reflex && (self.continuous || self.one_step) {
+                if hurt && self.reflex_session() {
                     // With the reflex opted in, a hit is recorded and the session keeps
                     // going: a flight goal keeps running (the adapter no longer stops it
                     // under fire) and the reflex may answer the attacker at once. Pausing on
@@ -617,8 +626,12 @@ impl Session {
                 }
                 Err(message) => {
                     self.event("rejected", message, vec![action.candidate], None);
-                    self.fail(message);
-                    return;
+                    // Under the reflex the hit was already recorded as survivable; the
+                    // refused action is simply not executed and the loop asks again.
+                    if !(message == REJECTED_AFTER_HIT && self.reflex_session()) {
+                        self.fail(message);
+                        return;
+                    }
                 }
             }
         }
@@ -704,16 +717,19 @@ impl Session {
                     return;
                 }
                 Ok(decision) => {
-                    let fresh =
+                    let same_world =
                         answer_is_current(pending.generation, self.generation, age, pending.timing)
                             && self.observed_at.elapsed() <= Duration::from_secs(1)
                             && self.view.observation.as_ref().is_some_and(|now| {
                                 now.connected
                                     && now.dimension == pending.observation.dimension
                                     && now.world_epoch == pending.observation.world_epoch
-                                    && now.health >= pending.observation.health
-                                    && distance(&now.position, &pending.observation.position) <= 1.5
                             });
+                    let unchanged = self.view.observation.as_ref().is_some_and(|now| {
+                        now.health >= pending.observation.health
+                            && distance(&now.position, &pending.observation.position) <= 1.5
+                    });
+                    let fresh = same_world && unchanged;
                     self.event(
                         "decision",
                         format!(
@@ -729,6 +745,18 @@ impl Session {
                         pending.candidates.clone(),
                         Some(decision.clone()),
                     );
+                    if same_world && !unchanged && self.reflex_session() {
+                        // A hit (or its knockback) overtook the answer. The reflex session
+                        // already chose to survive the hit, so the stale answer is dropped,
+                        // never acted on, and the paced loop asks again from the new state.
+                        self.event(
+                            "rejected",
+                            "Answer overtaken by damage or knockback under the safety reflex; dropped",
+                            vec![],
+                            None,
+                        );
+                        return;
+                    }
                     if !fresh {
                         self.fail("Stale or changed observation: model answer rejected");
                         return;
@@ -2186,6 +2214,155 @@ mod tests {
         assert_eq!(
             session.view.last_error.as_deref(),
             Some("TypeSafe request failed")
+        );
+    }
+
+    fn stale_answer() -> Decision {
+        Decision {
+            choice: "wait".into(),
+            probabilities: std::collections::BTreeMap::new(),
+            confidence: None,
+            model: "test".into(),
+            input_tokens: None,
+            output_tokens: None,
+            latency_ms: 0,
+        }
+    }
+
+    /// Regression for "keep fleeing under fire": with the reflex on, a hit is survived, but
+    /// an answer requested before the hit failed the health freshness check and ended the
+    /// night run as `provider_failed`. The answer is stale and must be dropped, not fatal.
+    #[tokio::test]
+    async fn with_the_reflex_an_answer_overtaken_by_a_hit_is_dropped_and_the_loop_keeps_running() {
+        let start = observation();
+        let (mut session, _commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        session.next_request_at = Instant::now() + Duration::from_secs(60);
+        session.pending = Some(pending_with(&session, Ok(stale_answer())));
+        let mut hurt = next(&start);
+        hurt.health = 16.0;
+        feed.send_replace(Some(hurt));
+
+        session.tick();
+
+        assert!(
+            session.view.last_error.is_none(),
+            "{:?}",
+            session.view.last_error
+        );
+        assert!(session.continuous, "the run mode survives the stale answer");
+        assert!(session.pending.is_none(), "the answer was consumed");
+        assert!(
+            session
+                .view
+                .events
+                .iter()
+                .any(|event| event.kind == "rejected"),
+            "the dropped answer is recorded"
+        );
+        assert!(
+            session.dispatched.is_none() && session.active.is_none(),
+            "a stale answer is never acted on"
+        );
+    }
+
+    /// Without the reflex the same hit is a local stop before the pending answer is read;
+    /// the harness resumes `HEALTH_DECREASED`, so this path is already survivable.
+    /// See also `without_the_reflex_a_hit_is_still_a_local_stop`.
+    #[tokio::test]
+    async fn without_the_reflex_an_answer_overtaken_by_a_hit_is_still_a_local_stop() {
+        let start = observation();
+        let (mut session, _commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        session.pending = Some(pending_with(&session, Ok(stale_answer())));
+        let mut hurt = next(&start);
+        hurt.health = 16.0;
+        feed.send_replace(Some(hurt));
+
+        session.tick();
+
+        assert_eq!(session.view.last_error.as_deref(), Some(HEALTH_DECREASED));
+        assert!(session.dispatched.is_none() && session.active.is_none());
+    }
+
+    /// Same family: a hit while an action waits for adapter acceptance makes the adapter
+    /// reject it with "Health decreased before action acceptance". With the reflex on the
+    /// hit is survivable, so the rejection is recorded and the loop goes on.
+    #[tokio::test]
+    async fn with_the_reflex_an_action_rejected_after_a_hit_is_recorded_and_the_loop_keeps_running()
+    {
+        let start = observation();
+        let (mut session, mut commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        session.next_request_at = Instant::now() + Duration::from_secs(60);
+        let candidate = Candidate {
+            id: "wait".into(),
+            description: "Wait".into(),
+            target: None,
+            duration_ms: 100,
+        };
+        session.apply(
+            candidate.clone(),
+            "Jev selected goal; local executor",
+            vec![candidate],
+            None,
+            None,
+        );
+        let AdapterCommand::Execute(request) = commands.try_recv().unwrap() else {
+            panic!("expected dispatch");
+        };
+        request
+            .reply
+            .send(Err("Health decreased before action acceptance"))
+            .unwrap();
+        let mut hurt = next(&start);
+        hurt.health = 16.0;
+        feed.send_replace(Some(hurt));
+
+        session.tick();
+
+        assert!(
+            session.view.last_error.is_none(),
+            "{:?}",
+            session.view.last_error
+        );
+        assert!(session.continuous, "the run mode survives the rejection");
+        assert!(session.dispatched.is_none() && session.active.is_none());
+        assert!(
+            session
+                .view
+                .events
+                .iter()
+                .any(|event| event.kind == "rejected"),
+            "the rejected action is recorded"
+        );
+        assert!(
+            !session
+                .view
+                .events
+                .iter()
+                .any(|event| event.kind == "action"),
+            "a rejected action is never recorded as accepted"
         );
     }
 }
