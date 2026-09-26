@@ -230,3 +230,16 @@ fn rejected_server_content_is_not_reflected_in_errors() {
         assert!(!format!("{error:?}").contains(SECRET));
     }
 }
+
+#[test]
+fn a_distribution_that_does_not_sum_to_one_names_the_computed_sum() {
+    let mut value = response();
+    value["answers"]["action"]["probabilities"] = json!({"wait": 0.6, "waypoint_1": 0.3});
+    let error = validate_response(value, &candidates(), 1)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("sum 0.9000 over 2 options"),
+        "the sum is computed here, so it can be named: {error}"
+    );
+}

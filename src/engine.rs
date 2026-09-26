@@ -21,6 +21,9 @@ pub const WORLD_LIFECYCLE_CHANGED: &str =
 /// Recorded when an observation shows lower health, or none left: a local stop that does
 /// not wait for the model.
 pub const HEALTH_DECREASED: &str = "Health decreased: local stop without waiting for the model";
+/// Recorded when the adapter reports a death (or an observation shows no health left).
+/// It ends a session: the respawned bot is somewhere else with nothing it had.
+pub const BOT_DIED: &str = "Bot died: local stop; the session ends";
 
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -490,12 +493,25 @@ impl Session {
                     .observation
                     .as_ref()
                     .is_some_and(|old| old.dimension != observation.dimension);
+                let previous_health = self.view.observation.as_ref().map(|old| old.health);
+                let died = observation.health <= 0.0
+                    || self
+                        .view
+                        .observation
+                        .as_ref()
+                        .is_some_and(|old| observation.deaths > old.deaths);
                 let world_changed = self.view.observation.as_ref().is_some_and(|old| {
                     old.dimension != observation.dimension
                         || old.world_epoch != observation.world_epoch
                 });
                 self.observed_at = Instant::now();
                 self.view.observation = Some(observation.clone());
+                // Checked before the world change: a death followed by a respawn in another
+                // dimension is a death, not a transfer.
+                if died {
+                    self.fail(BOT_DIED);
+                    return;
+                }
                 if world_changed {
                     self.fail(if dimension_changed {
                         DIMENSION_CHANGED
@@ -510,7 +526,22 @@ impl Session {
                     self.event("disconnect", observation.note, vec![], None);
                     return;
                 }
-                if hurt || observation.health <= 0.0 {
+                if hurt && self.settings.safety_reflex && (self.continuous || self.one_step) {
+                    // With the reflex opted in, a hit is recorded and the session keeps
+                    // going: a flight goal keeps running (the adapter no longer stops it
+                    // under fire) and the reflex may answer the attacker at once. Pausing on
+                    // every hit is what kept the bot standing still under arrows.
+                    self.event(
+                        "hurt",
+                        format!(
+                            "Health {:.1} -> {:.1}; reflex session continues without a local stop",
+                            previous_health.unwrap_or(observation.health),
+                            observation.health
+                        ),
+                        vec![],
+                        None,
+                    );
+                } else if hurt {
                     self.fail(HEALTH_DECREASED);
                     return;
                 }
@@ -658,6 +689,16 @@ impl Session {
             self.view.goal_ms = timing.goal_ms;
             self.view.answer_age_limit_ms = timing.max_answer_age_ms;
             match result {
+                Err(message)
+                    if message.starts_with(crate::provider::REJECTED_ANSWER)
+                        && (self.continuous || self.one_step) =>
+                {
+                    // A malformed answer is dropped, never acted on; the paced loop sends
+                    // its next request as usual. Safety never waited on this answer.
+                    self.view.rejected_answers += 1;
+                    self.event("rejected", message, vec![], None);
+                    return;
+                }
                 Err(message) => {
                     self.fail(message);
                     return;
@@ -1120,6 +1161,7 @@ mod tests {
         Observation {
             world_epoch: 1,
             dimension: Some("fixture:overworld".into()),
+            deaths: 0,
             sequence: 1,
             connected: true,
             position: Position {
@@ -1879,5 +1921,271 @@ mod tests {
         session.next_request_at = Instant::now() - Duration::from_millis(1);
         session.tick();
         assert_eq!(session.view.requests, 2);
+    }
+
+    /// A session whose adapter feed the test can publish to, unlike `connected_session`,
+    /// whose sender is dropped once the first observation is in place.
+    fn fed_session(
+        settings: Settings,
+        published: Observation,
+    ) -> (
+        Session,
+        mpsc::UnboundedReceiver<AdapterCommand>,
+        tokio::sync::watch::Sender<Option<Observation>>,
+    ) {
+        let mut session = session();
+        session.settings = settings;
+        session.view.observation = Some(published.clone());
+        session.observed_at = Instant::now();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let (feed, observations) = tokio::sync::watch::channel(Some(published));
+        let (_errors_tx, errors) = tokio::sync::watch::channel(None);
+        session.adapter = Some(AdapterHandle {
+            commands,
+            observations,
+            errors,
+            task: tokio::spawn(std::future::pending()),
+        });
+        (session, receiver, feed)
+    }
+
+    fn next(observation: &Observation) -> Observation {
+        let mut next = observation.clone();
+        next.sequence += 1;
+        next
+    }
+
+    #[tokio::test]
+    async fn with_the_reflex_a_hit_is_recorded_and_the_session_keeps_running() {
+        let start = threat_observation();
+        let (mut session, _commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        let mut hurt = next(&start);
+        hurt.health = 16.0;
+        feed.send_replace(Some(hurt));
+
+        session.tick();
+
+        assert!(
+            session.view.last_error.is_none(),
+            "{:?}",
+            session.view.last_error
+        );
+        assert!(session.continuous, "the run mode survives the hit");
+        let event = session
+            .view
+            .events
+            .iter()
+            .find(|event| event.kind == "hurt")
+            .expect("the hit is recorded");
+        assert!(event.message.contains("20.0 -> 16.0"), "{}", event.message);
+    }
+
+    #[tokio::test]
+    async fn without_the_reflex_a_hit_is_still_a_local_stop() {
+        let start = observation();
+        let (mut session, _commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        let mut hurt = next(&start);
+        hurt.health = 16.0;
+        feed.send_replace(Some(hurt));
+
+        session.tick();
+
+        assert_eq!(session.view.last_error.as_deref(), Some(HEALTH_DECREASED));
+    }
+
+    /// Regression for the live night run: the bot died and respawned in the hub between
+    /// two sampled observations, the engine saw only a dimension change and the harness
+    /// kept the session running in the wrong world.
+    #[tokio::test]
+    async fn a_death_counted_by_the_adapter_ends_even_when_the_respawn_changed_the_world() {
+        let start = observation();
+        let (mut session, _commands, feed) = fed_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            start.clone(),
+        );
+        session.continuous = true;
+        let mut respawned = next(&start);
+        respawned.deaths = 1;
+        respawned.health = 20.0;
+        respawned.world_epoch += 1;
+        respawned.dimension = Some("minecraft:hub".into());
+        feed.send_replace(Some(respawned));
+
+        session.tick();
+
+        assert_eq!(session.view.last_error.as_deref(), Some(BOT_DIED));
+    }
+
+    #[tokio::test]
+    async fn no_health_left_is_a_death_with_or_without_the_reflex() {
+        for safety_reflex in [false, true] {
+            let start = observation();
+            let (mut session, _commands, feed) = fed_session(
+                Settings {
+                    mode: Mode::Live,
+                    safety_reflex,
+                    ..Settings::default()
+                },
+                start.clone(),
+            );
+            session.continuous = true;
+            let mut dead = next(&start);
+            dead.health = 0.0;
+            feed.send_replace(Some(dead));
+
+            session.tick();
+
+            assert_eq!(
+                session.view.last_error.as_deref(),
+                Some(BOT_DIED),
+                "reflex {safety_reflex}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skeleton_outside_the_melee_radius_triggers_the_reflex() {
+        let mut observation = threat_observation();
+        // 10 blocks away: beyond the 6-block melee reflex, inside a skeleton's range.
+        observation.entities = vec![Landmark {
+            name: "Skeleton".into(),
+            position: Position {
+                x: 0.5,
+                y: 64.0,
+                z: -9.5,
+            },
+        }];
+        observation.blocks = vec![
+            Landmark {
+                name: "waypoint:6:64:0".into(),
+                position: Position {
+                    x: 6.5,
+                    y: 64.0,
+                    z: 0.5,
+                },
+            },
+            Landmark {
+                name: "waypoint:0:64:6".into(),
+                position: Position {
+                    x: 0.5,
+                    y: 64.0,
+                    z: 6.5,
+                },
+            },
+        ];
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            observation,
+        );
+        session.continuous = true;
+
+        session.tick();
+
+        assert_eq!(session.view.reflexes, 1);
+        let dispatched = session.dispatched.as_ref().expect("reflex dispatched");
+        assert_eq!(
+            dispatched.candidate.id, "flee_0",
+            "the reflex runs across the line of fire, not straight down it"
+        );
+    }
+
+    fn pending_with(session: &Session, result: Result<Decision, String>) -> Pending {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender.send(result).unwrap();
+        Pending {
+            generation: session.generation,
+            started: Instant::now(),
+            observation: session.view.observation.clone().unwrap(),
+            candidates: vec![],
+            timing: session.latency.timing(),
+            receiver,
+            task: tokio::spawn(async {}),
+        }
+    }
+
+    /// Regression for two live runs that ended as `provider_failed` on one malformed
+    /// answer out of dozens: a rejected answer is recorded and dropped, the run goes on.
+    #[tokio::test]
+    async fn a_rejected_answer_is_dropped_and_the_loop_keeps_running() {
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Live,
+                ..Settings::default()
+            },
+            observation(),
+        );
+        session.continuous = true;
+        let rejected = format!(
+            "{}TypeSafe probabilities do not sum to one (sum 0.9000 over 2 options)",
+            crate::provider::REJECTED_ANSWER
+        );
+        session.pending = Some(pending_with(&session, Err(rejected.clone())));
+
+        session.tick();
+
+        assert!(
+            session.view.last_error.is_none(),
+            "{:?}",
+            session.view.last_error
+        );
+        assert!(session.continuous);
+        assert_eq!(session.view.rejected_answers, 1);
+        assert!(
+            session
+                .view
+                .events
+                .iter()
+                .any(|event| event.kind == "rejected" && event.message == rejected)
+        );
+        assert!(
+            session.dispatched.is_none(),
+            "a rejected answer is never acted on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_still_ends_the_session() {
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Live,
+                ..Settings::default()
+            },
+            observation(),
+        );
+        session.continuous = true;
+        session.pending = Some(pending_with(
+            &session,
+            Err("TypeSafe request failed".into()),
+        ));
+
+        session.tick();
+
+        assert_eq!(
+            session.view.last_error.as_deref(),
+            Some("TypeSafe request failed")
+        );
     }
 }

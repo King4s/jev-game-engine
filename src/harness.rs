@@ -22,7 +22,9 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use crate::{
-    engine::{DIMENSION_CHANGED, EngineHandle, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED},
+    engine::{
+        BOT_DIED, DIMENSION_CHANGED, EngineHandle, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED,
+    },
     model::{Command, Event, Mode, Observation, Position, Settings, View},
     origin::{ActionOrigin, event_origin},
     recording,
@@ -164,6 +166,10 @@ pub struct Counts {
     pub accepted_actions: u32,
     pub arrival_verdicts: u32,
     pub arrived: u32,
+    /// Hits the engine recorded without stopping (reflex sessions only).
+    pub hits: u32,
+    /// Model answers that failed validation and were dropped without acting.
+    pub rejected_answers: u32,
 }
 
 /// Summary of one run: the counts, the movement and the end state.
@@ -198,6 +204,10 @@ pub fn counts(events: &[Event]) -> Counts {
         match event.kind.as_str() {
             "request" => counts.requests += 1,
             "action" => counts.accepted_actions += 1,
+            "hurt" => counts.hits += 1,
+            "rejected" if event.message.starts_with(crate::provider::REJECTED_ANSWER) => {
+                counts.rejected_answers += 1;
+            }
             "decision" => {
                 if let Some(decision) = &event.decision {
                     counts.answers += 1;
@@ -386,7 +396,7 @@ pub enum ErrorOutcome {
 /// left ends the session as `Died`.
 pub fn classify_error(error: &str, connected: bool, health: Option<f32>) -> ErrorOutcome {
     let alive = health.is_some_and(|health| health > 0.0);
-    if error == HEALTH_DECREASED && !alive {
+    if error == BOT_DIED || (error == HEALTH_DECREASED && !alive) {
         return ErrorOutcome::End(EndReason::Died);
     }
     if connected

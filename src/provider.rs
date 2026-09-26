@@ -151,13 +151,19 @@ pub async fn decide(
         value,
         candidates,
         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-    )?;
+    )
+    .map_err(|error| anyhow!("{REJECTED_ANSWER}{error}"))?;
     ensure!(
         !decision.model.contains(api_key),
         "TypeSafe returned invalid model metadata"
     );
     Ok(decision)
 }
+
+/// Prefix of every error for a response that arrived but failed validation. The engine
+/// drops such an answer and keeps the session running; transport, key and size errors
+/// carry no prefix and still end it.
+pub const REJECTED_ANSWER: &str = "TypeSafe answer rejected: ";
 
 /// Validates provider data without including untrusted response values in errors.
 pub fn validate_response(
@@ -200,9 +206,11 @@ pub fn validate_response(
         probabilities.insert(id.clone(), probability(raw)?);
     }
     let sum: f64 = probabilities.values().sum();
+    // The sum is computed here, not copied from the response, so naming it leaks nothing.
     ensure!(
         (sum - 1.0).abs() <= 0.001,
-        "TypeSafe probabilities do not sum to one"
+        "TypeSafe probabilities do not sum to one (sum {sum:.4} over {} options)",
+        probabilities.len()
     );
     let chosen_probability = probabilities[choice];
     ensure!(
@@ -272,6 +280,7 @@ mod tests {
         Observation {
             world_epoch: 1,
             dimension: Some("fixture:overworld".into()),
+            deaths: 0,
             sequence: 1,
             connected: true,
             position: Position {

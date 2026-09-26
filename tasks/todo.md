@@ -206,3 +206,11 @@ Today the engine dispatches `decision.choice`, the single most likely candidate,
 - [ ] Offline evidence: unit tests for both policies on fixed distributions (below, at and above threshold; ties; a distribution without a non-wait candidate), and a fixture session showing a threshold dispatch in the timeline and in `recording-report`.
 - [ ] Live evidence: one budgeted `session-run` per policy on the test server with the same objective and pacing, compared by `recording-report` (answers, dispatched non-wait goals, arrival verdicts). Report both, including if the threshold policy moves the bot no more than argmax does.
 - [ ] Credit the paper and repository in README's credits when the feature ships.
+
+## Task 15: Real cover from shooters (operator rules, 2026-09-26, not started)
+
+Operator's rules from the first Survival night run: the only real cover is **inside a room whose door is closed behind the bot**, and a large room only counts if it is **lit everywhere** (otherwise mobs spawn inside). Prior art: Minecraft Wiki (Skeleton: shoots within 15 blocks only with a clear line of sight; blocks stop arrows); no surveyed bot project (mindcraft, Voyager, mineflayer-pvp, azalea examples, the Jev Minecraft repos) implements door- or light-based shelter, so this would be new.
+
+- [ ] Adapter capabilities first: observe doors (position, open/closed) and block light levels in the observed area; a bounded `use door` action that opens and closes a door, acknowledged like any other action.
+- [ ] A shelter candidate: an enclosed room reachable within the goal bound, every standable cell at a light level where hostile mobs cannot spawn, door closed after entry; offered to Jev and preferred by the reflex over running when a shooter is in range.
+- [ ] Offline tests on fixture rooms (lit/unlit, open/closed door, too far); live evidence in the test world, labelled as such.

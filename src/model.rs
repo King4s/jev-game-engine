@@ -21,6 +21,11 @@ pub struct Observation {
     /// Server-reported dimension identifier; absent in legacy recordings.
     #[serde(default)]
     pub dimension: Option<String>,
+    /// Deaths the adapter has seen this connection. Monotonic, so a death survives even
+    /// when the respawn observation replaces the dying one before the engine reads it;
+    /// absent (zero) in older recordings.
+    #[serde(default)]
+    pub deaths: u64,
     pub sequence: u64,
     pub connected: bool,
     pub position: Position,
@@ -181,6 +186,8 @@ pub struct View {
     /// Engine safety-reflex actions dispatched in this session, each one recorded with
     /// its own origin. Distinguishes engine-initiated flight from model choices.
     pub reflexes: u32,
+    /// Model answers that arrived but failed validation; dropped without acting.
+    pub rejected_answers: u32,
 }
 
 impl Default for View {
@@ -202,6 +209,7 @@ impl Default for View {
             replay: false,
             objective: String::new(),
             reflexes: 0,
+            rejected_answers: 0,
         }
     }
 }

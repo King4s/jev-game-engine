@@ -143,6 +143,12 @@ async fn run(
     let mut deferred: Option<ActionRequest> = None;
     let mut deferred_ready = false;
     let mut last_health: Option<f32> = None;
+    // Monotonic per connection; stamped on every observation so the engine sees a death
+    // even when the respawn observation replaces the dying one.
+    let mut deaths = 0_u64;
+    // A flight goal keeps running when the bot is hit: stopping under fire is what let
+    // skeleton arrows land every shot in the first live night run.
+    let mut fleeing = false;
     let mut note =
         String::from("Live server observation; local physics and pathfinding; no mining.");
     let mut timer = tokio::time::interval(Duration::from_millis(25));
@@ -172,10 +178,15 @@ async fn run(
                     last_snapshot = Instant::now();
                     if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, &note) {
                         sequence += 1;
-                        if observation.health <= 0.0 || last_health.is_some_and(|old| observation.health < old) {
+                        observation.deaths = deaths;
+                        let hurt = last_health.is_some_and(|old| observation.health < old);
+                        if observation.health > 0.0 && hurt && fleeing && deadline.is_some() {
+                            note = "Damage during a flight goal; movement continues.".into();
+                        } else if observation.health <= 0.0 || hurt {
                             reject_deferred(&mut deferred, "Health decreased before action acceptance");
                             stop(bot);
                             deadline = None;
+                            fleeing = false;
                             note = "Local health guard stopped movement after damage.".into();
                         }
                         last_health = Some(observation.health);
@@ -224,11 +235,21 @@ async fn run(
                     ready = true;
                     last_health = None;
                     last_tick = Instant::now();
+                    fleeing = false;
                     note = "World spawned; prior movement cancelled.".into();
-                    if let Some(observation) = observe(bot, sequence + 1, world_epoch, &note) {
+                    if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, &note) {
                         sequence += 1;
+                        observation.deaths = deaths;
                         observations.send_replace(Some(observation));
                     }
+                }
+                Some(Event::Death(_)) => {
+                    deaths = deaths.wrapping_add(1);
+                    reject_deferred(&mut deferred, "Bot died before action acceptance");
+                    stop(bot);
+                    deadline = None;
+                    fleeing = false;
+                    note = "Bot died; movement stopped.".into();
                 }
                 Some(Event::Login) => { reject_deferred(&mut deferred, "Login interrupted pending action"); ready = false; connected_at = Instant::now(); stop(bot); deadline = None; }
                 Some(Event::Tick) => {
@@ -244,6 +265,7 @@ async fn run(
                             || execute(bot, &candidate, request.accepted_before).map_err(|()| "Local guard rejected invalid, expired or unsafe action"),
                             || stop(bot)) {
                             deadline = Some(Instant::now() + Duration::from_millis(candidate.duration_ms));
+                            fleeing = candidate.id.starts_with("flee_");
                             note = "Adapter accepted bounded action; local Azalea pathfinding, not proof of movement.".into();
                         } else {
                             deadline = None;
@@ -445,6 +467,8 @@ fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<
     Some(Observation {
         world_epoch,
         dimension: Some(dimension),
+        // The caller stamps the adapter's death count; `observe` only reads the client.
+        deaths: 0,
         sequence,
         connected: true,
         position: Position {

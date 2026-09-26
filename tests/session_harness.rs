@@ -224,7 +224,9 @@ fn every_failure_has_its_own_non_zero_exit_code() {
 #[test]
 fn a_world_change_while_connected_resumes_instead_of_ending_the_session() {
     use harness::{ErrorOutcome, classify_error};
-    use jev_game_engine::engine::{DIMENSION_CHANGED, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED};
+    use jev_game_engine::engine::{
+        BOT_DIED, DIMENSION_CHANGED, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED,
+    };
 
     let alive = Some(20.0);
     for error in [DIMENSION_CHANGED, WORLD_LIFECYCLE_CHANGED, HEALTH_DECREASED] {
@@ -261,6 +263,12 @@ fn a_world_change_while_connected_resumes_instead_of_ending_the_session() {
             "{error} (connected {connected})"
         );
     }
+    // The adapter's death count ends the session even when the respawned bot is healthy
+    // and connected in another world, which is what the live run hid as a world change.
+    assert_eq!(
+        classify_error(BOT_DIED, true, alive),
+        ErrorOutcome::End(EndReason::Died)
+    );
     for (connected, health) in [(true, Some(0.0)), (false, Some(0.0)), (true, None)] {
         assert_eq!(
             classify_error(HEALTH_DECREASED, connected, health),

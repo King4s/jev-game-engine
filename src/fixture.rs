@@ -48,6 +48,7 @@ pub fn spawn_with_waypoint(waypoint: Position) -> AdapterHandle {
         let mut observation = Observation {
             world_epoch: 1,
             dimension: Some("fixture:overworld".into()),
+            deaths: 0,
             sequence: 0,
             connected: true,
             position: Position {
