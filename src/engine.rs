@@ -18,6 +18,9 @@ use crate::{
 pub const DIMENSION_CHANGED: &str = "Dimension changed: local stop and pending answers invalidated";
 pub const WORLD_LIFECYCLE_CHANGED: &str =
     "World lifecycle changed: local stop and pending answers invalidated";
+/// Recorded when an observation shows lower health, or none left: a local stop that does
+/// not wait for the model.
+pub const HEALTH_DECREASED: &str = "Health decreased: local stop without waiting for the model";
 
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -508,7 +511,7 @@ impl Session {
                     return;
                 }
                 if hurt || observation.health <= 0.0 {
-                    self.fail("Health decreased: local stop without waiting for the model");
+                    self.fail(HEALTH_DECREASED);
                     return;
                 }
                 if self.view.status == "Connecting" {

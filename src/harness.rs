@@ -22,7 +22,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use crate::{
-    engine::{DIMENSION_CHANGED, EngineHandle, WORLD_LIFECYCLE_CHANGED},
+    engine::{DIMENSION_CHANGED, EngineHandle, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED},
     model::{Command, Event, Mode, Observation, Position, Settings, View},
     origin::{ActionOrigin, event_origin},
     recording,
@@ -128,6 +128,8 @@ pub enum EndReason {
     Disconnected,
     /// The session neither ended nor failed inside the wall-clock guard.
     Stalled,
+    /// The bot's health reached zero.
+    Died,
 }
 
 impl EndReason {
@@ -140,6 +142,7 @@ impl EndReason {
             Self::ProviderFailed => 6,
             Self::Disconnected => 7,
             Self::Stalled => 8,
+            Self::Died => 9,
         }
     }
 }
@@ -369,18 +372,28 @@ fn wait_for_observation(
 /// What the harness does with an error the engine recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorOutcome {
-    /// A world or dimension change while still connected: the engine stopped locally and
-    /// the harness resumes, as an operator would.
+    /// A world or dimension change, or damage the bot survived, while still connected: the
+    /// engine stopped locally and the harness resumes, as an operator would.
     Resume,
     /// The session is over for this reason.
     End(EndReason),
 }
 
-/// Classifies an engine error. World changes are matched exactly against the engine's own
-/// messages; everything else is classified by its text, and a lost connection is read from
-/// the observation, not from the text.
-pub fn classify_error(error: &str, connected: bool) -> ErrorOutcome {
-    if connected && (error == DIMENSION_CHANGED || error == WORLD_LIFECYCLE_CHANGED) {
+/// Classifies an engine error. `health` is the latest observed health, if any. World changes
+/// and damage are matched exactly against the engine's own messages; everything else is
+/// classified by its text, and a lost connection is read from the observation, not from the
+/// text. Damage the bot survives is resumed so a survival objective can go on; no health
+/// left ends the session as `Died`.
+pub fn classify_error(error: &str, connected: bool, health: Option<f32>) -> ErrorOutcome {
+    let alive = health.is_some_and(|health| health > 0.0);
+    if error == HEALTH_DECREASED && !alive {
+        return ErrorOutcome::End(EndReason::Died);
+    }
+    if connected
+        && (error == DIMENSION_CHANGED
+            || error == WORLD_LIFECYCLE_CHANGED
+            || error == HEALTH_DECREASED)
+    {
         return ErrorOutcome::Resume;
     }
     ErrorOutcome::End(if error.contains("budget reached") {
@@ -410,8 +423,8 @@ fn wait_until_cleared(engine: &EngineHandle, error: &str) {
 }
 
 /// Waits until the engine ends the session. The engine records the end as an `error`
-/// event whose message names the budget; a world change is resumed rather than ended
-/// (see [`classify_error`]).
+/// event whose message names the budget; a world change or survived damage is resumed
+/// rather than ended (see [`classify_error`]).
 fn wait_for_end(
     engine: &EngineHandle,
     settings: &Settings,
@@ -432,13 +445,17 @@ fn wait_for_end(
             .as_ref()
             .is_some_and(|observation| observation.connected);
         if let Some(error) = &view.last_error {
-            match classify_error(error, connected) {
+            let health = view
+                .observation
+                .as_ref()
+                .map(|observation| observation.health);
+            match classify_error(error, connected, health) {
                 ErrorOutcome::Resume => {
                     // The same step an operator takes in the UI: the engine has already
                     // stopped locally and dropped stale answers; `Start` is recorded as a
                     // `control` event, so the resume is visible in the recording.
                     if verbose {
-                        println!("  harness: {error}; resuming in the new world");
+                        println!("  harness: {error}; resuming");
                     }
                     engine.send(Command::Start);
                     wait_until_cleared(engine, error);
