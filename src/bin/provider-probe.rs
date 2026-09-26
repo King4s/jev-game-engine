@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
         blocks: vec![],
         entities: vec![],
         note: "Synthetic API contract probe. No game is connected; movement must not occur.".into(),
+        ..Observation::default()
     };
     let candidates = vec![
         Candidate {

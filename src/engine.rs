@@ -1203,6 +1203,7 @@ mod tests {
             blocks: vec![],
             entities: vec![],
             note: "test fixture".into(),
+            ..Default::default()
         }
     }
 

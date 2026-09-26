@@ -8,4 +8,5 @@ pub mod model;
 pub mod origin;
 pub mod provider;
 pub mod recording;
+pub mod resources;
 pub mod survival;

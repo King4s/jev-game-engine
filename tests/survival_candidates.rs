@@ -35,6 +35,7 @@ fn observation(entities: Vec<Landmark>, blocks: Vec<Landmark>) -> Observation {
         blocks,
         entities,
         note: "survival test fixture".into(),
+        ..Default::default()
     }
 }
 

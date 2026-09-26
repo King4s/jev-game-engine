@@ -178,6 +178,7 @@ fn observation() -> Observation {
         blocks: vec![],
         entities: vec![],
         note: "arrival verdict test recording".into(),
+        ..Default::default()
     }
 }
 

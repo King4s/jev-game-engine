@@ -2,8 +2,12 @@
 use crate::{
     adapter::{AdapterCommand, AdapterHandle, execute_and_acknowledge},
     model::*,
+    resources::nearest_resources,
 };
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, watch};
 
 /// Waypoint geometry of [`spawn`]: 5.657 blocks from the origin.
@@ -32,6 +36,32 @@ pub const REACHABLE_WAYPOINT: Position = Position {
     z: 0.,
 };
 
+/// Fixed synthetic day time of the fixture: early morning, well before hostile spawning.
+pub const FIXTURE_TIME_OF_DAY: u64 = 1000;
+
+/// Fixed synthetic resources of the fixture as `(kind, name, position)`. Distances are
+/// recomputed from the fixture bot's position on every observation.
+pub const FIXTURE_RESOURCES: [(&str, &str, Position); 2] = [
+    (
+        "log",
+        "minecraft:oak_log",
+        Position {
+            x: -3.5,
+            y: 64.5,
+            z: 2.5,
+        },
+    ),
+    (
+        "sheep",
+        "minecraft:sheep",
+        Position {
+            x: -6.,
+            y: 64.,
+            z: -5.,
+        },
+    ),
+];
+
 /// Synthetic fixture with the distant waypoint, unchanged for adapter-level tests.
 pub fn spawn() -> AdapterHandle {
     spawn_with_waypoint(DISTANT_WAYPOINT)
@@ -58,13 +88,23 @@ pub fn spawn_with_waypoint(waypoint: Position) -> AdapterHandle {
             },
             health: 20.,
             food: 20.,
-            inventory: vec![],
+            inventory: vec![
+                "slot 36: WoodenPickaxe x1".into(),
+                "slot 37: OakLog x3".into(),
+            ],
             blocks: vec![Landmark {
                 name: "waypoint".into(),
                 position: waypoint,
             }],
             entities: vec![],
             note: "Synthetic offline fixture; no Minecraft connection".into(),
+            time_of_day: Some(FIXTURE_TIME_OF_DAY),
+            held_item: Some("minecraft:wooden_pickaxe".into()),
+            items: BTreeMap::from([
+                ("minecraft:oak_log".into(), 3),
+                ("minecraft:wooden_pickaxe".into(), 1),
+            ]),
+            resources: vec![],
         };
         let mut active: Option<(Candidate, Instant)> = None;
         let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -107,6 +147,7 @@ pub fn spawn_with_waypoint(waypoint: Position) -> AdapterHandle {
                             }
                         }
                     }
+                    observation.resources = nearest_resources(&observation.position, FIXTURE_RESOURCES.iter().cloned());
                     observation.sequence += 1;
                     if tx.send(Some(observation.clone())).is_err() { break; }
                 }
@@ -140,4 +181,41 @@ fn valid_action(candidate: &Candidate, position: &Position) -> bool {
     let dy = target.y - position.y;
     let dz = target.z - position.z;
     dx.hypot(dy).hypot(dz) <= 12.0
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn fixture_observation_exercises_survival_state() {
+        let mut adapter = super::spawn();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            adapter.observations.changed(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let observation = adapter.observations.borrow().clone().unwrap();
+        assert!(observation.note.contains("fixture"));
+        assert_eq!(observation.time_of_day, Some(super::FIXTURE_TIME_OF_DAY));
+        assert_eq!(
+            observation.held_item.as_deref(),
+            Some("minecraft:wooden_pickaxe")
+        );
+        assert_eq!(observation.items["minecraft:oak_log"], 3);
+        assert_eq!(observation.food, 20.0);
+        for kind in ["log", "sheep"] {
+            let resource = observation
+                .resources
+                .iter()
+                .find(|r| r.kind == kind)
+                .unwrap();
+            assert!(resource.distance_m > 0.0 && resource.distance_m <= 16.0);
+        }
+        adapter
+            .commands
+            .send(crate::adapter::AdapterCommand::Disconnect)
+            .unwrap();
+        (&mut adapter.task).await.unwrap();
+    }
 }

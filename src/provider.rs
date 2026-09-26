@@ -311,6 +311,7 @@ mod tests {
             blocks: vec![],
             entities: vec![],
             note: "test fixture".into(),
+            ..Default::default()
         }
     }
 
@@ -348,6 +349,34 @@ mod tests {
             body["questions"]["action"]["criteria"]["wait"]["duration_ms"],
             2_000
         );
+    }
+
+    #[test]
+    fn populated_survival_observation_is_present_in_provider_state() {
+        use crate::model::Resource;
+        use std::collections::BTreeMap;
+
+        let mut observation = observation();
+        observation.time_of_day = Some(13_500);
+        observation.held_item = Some("minecraft:stone_pickaxe".into());
+        observation.items = BTreeMap::from([("minecraft:oak_log".into(), 12)]);
+        observation.resources = vec![Resource {
+            kind: "sheep".into(),
+            name: "minecraft:sheep".into(),
+            position: Position {
+                x: 3.0,
+                y: 64.0,
+                z: 4.0,
+            },
+            distance_m: 5.0,
+        }];
+
+        let body = request_body(&observation, &[wait()], "");
+        let sent = &body["state"]["observation"];
+        assert_eq!(sent["time_of_day"], 13_500);
+        assert_eq!(sent["items"]["minecraft:oak_log"], 12);
+        assert_eq!(sent["resources"][0]["kind"], "sheep");
+        assert_eq!(sent["resources"][0]["name"], "minecraft:sheep");
     }
 
     #[test]

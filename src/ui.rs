@@ -732,6 +732,7 @@ mod tests {
             }],
             entities: vec![],
             note: "Synthetic offline fixture; no Minecraft connection".into(),
+            ..Default::default()
         };
         View {
             status: "Connected".into(),

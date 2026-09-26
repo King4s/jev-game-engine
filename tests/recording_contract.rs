@@ -33,6 +33,7 @@ fn recording() -> Recording {
                 blocks: vec![],
                 entities: vec![],
                 note: "Offline test observation".into(),
+                ..Default::default()
             }),
             candidates: vec![Candidate {
                 id: "wait".into(),

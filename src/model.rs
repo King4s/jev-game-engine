@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -13,7 +15,21 @@ pub struct Landmark {
     pub position: Position,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A useful block or animal near the bot, reported as one of the nearest of its kind.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Resource {
+    /// Survival category, for example `log`, `iron_ore`, `bed` or `sheep`.
+    pub kind: String,
+    /// Registry id of the block or entity, for example `minecraft:oak_log`.
+    pub name: String,
+    pub position: Position,
+    /// Distance in blocks from the observed bot position to `position`.
+    pub distance_m: f64,
+}
+
+/// `Default` exists so code that builds an observation can name only the fields it
+/// knows; the default is a disconnected, empty observation, never a plausible world.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Observation {
     /// Adapter-local world lifecycle; changes even on same-dimension respawn.
     #[serde(default)]
@@ -35,6 +51,20 @@ pub struct Observation {
     pub blocks: Vec<Landmark>,
     pub entities: Vec<Landmark>,
     pub note: String,
+    /// Tick within the 24,000-tick day cycle, as last sent by the server. `None` until
+    /// the server has sent the time, and in recordings made before it was observed.
+    #[serde(default)]
+    pub time_of_day: Option<u64>,
+    /// Registry id of the item in the selected hotbar slot; `None` when the hand is
+    /// empty or the inventory is unknown.
+    #[serde(default)]
+    pub held_item: Option<String>,
+    /// Inventory totals by registry item id, for example `minecraft:oak_log: 12`.
+    #[serde(default)]
+    pub items: BTreeMap<String, u32>,
+    /// Nearest useful blocks and animals, at most three per kind, sorted by distance.
+    #[serde(default)]
+    pub resources: Vec<Resource>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

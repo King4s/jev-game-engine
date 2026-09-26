@@ -185,3 +185,26 @@ fn an_unknown_fixture_geometry_is_rejected_rather_than_defaulted() {
         );
     }
 }
+
+#[test]
+fn observations_from_before_survival_fields_default_cleanly() {
+    let legacy = json!({
+        "world_epoch": 3,
+        "dimension": "minecraft:overworld",
+        "deaths": 0,
+        "sequence": 1,
+        "connected": true,
+        "position": {"x": 1.0, "y": 64.0, "z": 2.0},
+        "health": 20.0,
+        "food": 18.0,
+        "inventory": ["slot 0: OakLog x2"],
+        "blocks": [],
+        "entities": [],
+        "note": "legacy observation"
+    });
+    let observation: jev_game_engine::model::Observation = serde_json::from_value(legacy).unwrap();
+    assert_eq!(observation.time_of_day, None);
+    assert_eq!(observation.held_item, None);
+    assert!(observation.items.is_empty());
+    assert!(observation.resources.is_empty());
+}

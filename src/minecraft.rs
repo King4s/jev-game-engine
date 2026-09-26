@@ -1,5 +1,6 @@
 //! Minecraft 26.2 adapter for the pinned Azalea revision. Local server only.
 use std::{
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
     time::{Duration, Instant},
 };
@@ -7,9 +8,15 @@ use std::{
 use azalea::{
     BlockPos, Client, Event, StartClientOpts, Vec3, WalkDirection,
     account::Account,
+    core::{data_registry::DataRegistryWithKey, registry_holder::RegistryHolder},
+    entity::inventory::Inventory,
     pathfinder::{PathfinderClientExt, PathfinderOpts, goals::BlockPosGoal},
     physics::collision::BlockWithShape,
-    protocol::address::ResolvedAddr,
+    protocol::{
+        address::ResolvedAddr,
+        packets::game::{ClientboundGamePacket, ClientboundSetTime},
+    },
+    registry::{builtin::BlockKind, data::WorldClockKey},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -17,7 +24,13 @@ use crate::{
     adapter::{ActionRequest, AdapterCommand, AdapterHandle, execute_and_acknowledge},
     engine::REJECTED_AFTER_HIT,
     model::{Candidate, Landmark, Observation, Position, Settings},
+    resources::{
+        animal_in_range, block_scan_offsets, classify_block, classify_entity, nearest_resources,
+    },
 };
+
+/// Ticks in one Minecraft day cycle.
+const DAY_TICKS: u64 = 24_000;
 
 pub fn spawn(settings: Settings) -> AdapterHandle {
     let (commands, receiver) = mpsc::unbounded_channel();
@@ -150,6 +163,9 @@ async fn run(
     // A flight goal keeps running when the bot is hit: stopping under fire is what let
     // skeleton arrows land every shot in the first live night run.
     let mut fleeing = false;
+    // Azalea's own SetTime handler discards the packet, so the adapter keeps the last
+    // day time it saw; `None` until the server has sent one.
+    let mut time_of_day: Option<u64> = None;
     let mut note =
         String::from("Live server observation; local physics and pathfinding; no mining.");
     let mut timer = tokio::time::interval(Duration::from_millis(25));
@@ -177,7 +193,7 @@ async fn run(
                 }
                 if ready && last_snapshot.elapsed() >= Duration::from_millis(250) {
                     last_snapshot = Instant::now();
-                    if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, &note) {
+                    if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, time_of_day, &note) {
                         sequence += 1;
                         observation.deaths = deaths;
                         let hurt = last_health.is_some_and(|old| observation.health < old);
@@ -238,7 +254,7 @@ async fn run(
                     last_tick = Instant::now();
                     fleeing = false;
                     note = "World spawned; prior movement cancelled.".into();
-                    if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, &note) {
+                    if let Some(mut observation) = observe(bot, sequence + 1, world_epoch, time_of_day, &note) {
                         sequence += 1;
                         observation.deaths = deaths;
                         observations.send_replace(Some(observation));
@@ -251,6 +267,14 @@ async fn run(
                     deadline = None;
                     fleeing = false;
                     note = "Bot died; movement stopped.".into();
+                }
+                Some(Event::Packet(packet)) => {
+                    if let ClientboundGamePacket::SetTime(packet) = &*packet
+                        && let Ok(world) = bot.world()
+                        && let Some(ticks) = day_time(packet, &world.read().registries)
+                    {
+                        time_of_day = Some(ticks);
+                    }
                 }
                 Some(Event::Login) => { reject_deferred(&mut deferred, "Login interrupted pending action"); ready = false; connected_at = Instant::now(); stop(bot); deadline = None; }
                 Some(Event::Tick) => {
@@ -370,7 +394,62 @@ fn supports_endpoint(support: azalea::block::BlockState) -> bool {
     support.is_collision_shape_full() && azalea::pathfinder::world::is_block_state_solid(support)
 }
 
-fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<Observation> {
+/// Day time of the overworld clock in a SetTime packet, as a tick within the day cycle.
+///
+/// Minecraft 26.2 sends one clock state per world clock instead of a single day time
+/// (`ClientboundSetTime::clock_updates`). A clock whose id the client's registries cannot
+/// resolve is used only when it is the packet's single clock.
+fn day_time(packet: &ClientboundSetTime, registries: &RegistryHolder) -> Option<u64> {
+    let single = packet.clock_updates.len() == 1;
+    let mut fallback = None;
+    for (clock, state) in &packet.clock_updates {
+        match clock.key(registries) {
+            Some(WorldClockKey::Overworld) => return Some(normalise_day_time(state.total_ticks)),
+            None if single => fallback = Some(normalise_day_time(state.total_ticks)),
+            _ => {}
+        }
+    }
+    fallback
+}
+
+fn normalise_day_time(ticks: u64) -> u64 {
+    ticks % DAY_TICKS
+}
+
+/// Owned items, using the active menu's freshest player slots. Container contents
+/// and crafting previews are not property; the cursor is counted exactly once.
+fn inventory_totals(inventory: &Inventory) -> BTreeMap<String, u32> {
+    let menu = inventory.menu();
+    let player = inventory.inventory_menu.as_player();
+    let mut totals = BTreeMap::new();
+    let craft = if inventory.container_menu.is_none() {
+        &player.craft[..]
+    } else {
+        &[]
+    };
+    for item in menu
+        .player_slots_range()
+        .filter_map(|slot| menu.slot(slot))
+        .chain(player.armor.iter())
+        .chain(std::iter::once(&player.offhand))
+        .chain(craft.iter())
+        .chain(std::iter::once(&inventory.carried))
+    {
+        if !item.is_empty() {
+            let total: &mut u32 = totals.entry(item.kind().to_str().to_owned()).or_default();
+            *total = total.saturating_add(u32::try_from(item.count()).unwrap_or(0));
+        }
+    }
+    totals
+}
+
+fn observe(
+    bot: &Client,
+    sequence: u64,
+    world_epoch: u64,
+    time_of_day: Option<u64>,
+    note: &str,
+) -> Option<Observation> {
     let dimension = bot.world_name().ok()?.0.to_string();
     let position = bot.position().ok()?;
     let health = bot.health().ok()?;
@@ -383,6 +462,14 @@ fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<
         return None;
     }
     let mut missing = Vec::new();
+    if time_of_day.is_none() {
+        missing.push("time unavailable");
+    }
+    let items = bot
+        .component::<Inventory>()
+        .ok()
+        .map(|inventory| inventory_totals(&inventory))
+        .unwrap_or_default();
     let inventory = match bot
         .get_inventory()
         .ok()
@@ -399,10 +486,48 @@ fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<
             Vec::new()
         }
     };
+    // `Client::get_held_item` reads the selected hotbar slot of the open menu.
+    let held_item = match bot.get_held_item() {
+        Ok(item) if item.is_empty() => None,
+        Ok(item) => Some(item.kind().to_str().to_owned()),
+        Err(_) => {
+            missing.push("held item unavailable");
+            None
+        }
+    };
+    let origin = Position {
+        x: position.x,
+        y: position.y,
+        z: position.z,
+    };
+    // Resource finds borrow `&'static` registry ids, so only the kept ones allocate.
+    let mut finds: Vec<(&'static str, &'static str, Position)> = Vec::new();
     let mut blocks = Vec::new();
     if let Ok(world) = bot.world() {
         let world = world.read();
         let center = BlockPos::from(position);
+        // Bounded resource scan of loaded cells; unloaded cells are skipped.
+        for (x, y, z) in block_scan_offsets() {
+            let point = BlockPos::new(center.x + x, center.y + y, center.z + z);
+            let Some(block) = world.get_block_state(point) else {
+                continue;
+            };
+            if block.is_air() {
+                continue;
+            }
+            let name = BlockKind::from(block).to_str();
+            if let Some(kind) = classify_block(name) {
+                finds.push((
+                    kind,
+                    name,
+                    Position {
+                        x: point.x as f64 + 0.5,
+                        y: point.y as f64 + 0.5,
+                        z: point.z as f64 + 0.5,
+                    },
+                ));
+            }
+        }
         // A bounded sample, not a complete world map; only loaded non-air cells.
         for x in -3..=3 {
             for z in -3..=3 {
@@ -462,6 +587,33 @@ fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<
                 });
             }
         }
+        // Animals are not capped by the 32 landmarks above: every known one in range counts.
+        for entity in nearby.iter() {
+            if entity.id() == bot.entity {
+                continue;
+            }
+            if let (Ok(point), Ok(kind)) = (entity.position(), entity.kind())
+                && animal_in_range(
+                    &origin,
+                    &Position {
+                        x: point.x,
+                        y: point.y,
+                        z: point.z,
+                    },
+                )
+                && let Some(animal) = classify_entity(kind.to_str())
+            {
+                finds.push((
+                    animal,
+                    kind.to_str(),
+                    Position {
+                        x: point.x,
+                        y: point.y,
+                        z: point.z,
+                    },
+                ));
+            }
+        }
     } else {
         missing.push("entities unavailable");
     }
@@ -472,25 +624,143 @@ fn observe(bot: &Client, sequence: u64, world_epoch: u64, note: &str) -> Option<
         deaths: 0,
         sequence,
         connected: true,
-        position: Position {
-            x: position.x,
-            y: position.y,
-            z: position.z,
-        },
+        position: origin.clone(),
         health,
         food,
         inventory,
         blocks,
         entities,
         note: format!(
-            "{note} Blocks sampled within 3 cells; entities capped at 32 within 16 blocks. {}",
+            "{note} Blocks sampled within 3 cells; entities capped at 32 within 16 blocks;              resources scanned within 16 blocks horizontally and 8 vertically. {}",
             missing.join("; ")
         ),
+        time_of_day,
+        held_item,
+        items,
+        resources: nearest_resources(&origin, finds),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use azalea::{entity::inventory::Inventory, inventory::ItemStack, registry::builtin::ItemKind};
+
+    #[test]
+    fn item_totals_aggregate_player_slots_only_and_use_canonical_ids() {
+        let mut inventory = Inventory::default();
+        let player = inventory.inventory_menu.as_player_mut();
+        player.inventory[0] = ItemStack::new(ItemKind::OakLog, 5);
+        player.inventory[1] = ItemStack::new(ItemKind::OakLog, 7);
+        player.inventory[2] = ItemStack::new(ItemKind::Dirt, 2);
+
+        // Exercise Azalea's real Inventory and ItemStack models. The helper is the seam
+        // observe should use to avoid counting an open container's slots as bot property.
+        assert_eq!(
+            super::inventory_totals(&inventory),
+            BTreeMap::from([
+                ("minecraft:dirt".to_owned(), 2),
+                ("minecraft:oak_log".to_owned(), 12),
+            ])
+        );
+    }
+
+    #[test]
+    fn open_chest_uses_fresh_player_slots_without_counting_chest_or_stale_copy() {
+        use azalea::{inventory::Menu, registry::builtin::MenuKind};
+        let mut inventory = Inventory::default();
+        let player = inventory.inventory_menu.as_player_mut();
+        player.inventory[0] = ItemStack::new(ItemKind::OakLog, 64);
+        player.armor[0] = ItemStack::new(ItemKind::IronHelmet, 1);
+        player.offhand = ItemStack::new(ItemKind::Torch, 4);
+        player.craft_result = ItemStack::new(ItemKind::OakPlanks, 4);
+        player.craft[0] = ItemStack::new(ItemKind::OakLog, 32);
+        let mut chest = Menu::from_kind(MenuKind::Generic9x3);
+        *chest.slot_mut(0).unwrap() = ItemStack::new(ItemKind::Diamond, 64);
+        let start = *chest.player_slots_range().start();
+        *chest.slot_mut(start).unwrap() = ItemStack::new(ItemKind::OakLog, 5);
+        *chest.slot_mut(start + 35).unwrap() = ItemStack::new(ItemKind::OakLog, 7);
+        inventory.container_menu = Some(chest);
+        inventory.id = 1;
+        inventory.carried = ItemStack::new(ItemKind::OakLog, 2);
+        assert_eq!(
+            super::inventory_totals(&inventory),
+            BTreeMap::from([
+                ("minecraft:oak_log".into(), 14),
+                ("minecraft:iron_helmet".into(), 1),
+                ("minecraft:torch".into(), 4),
+            ])
+        );
+    }
+
+    #[test]
+    fn closed_crafting_inputs_are_owned_but_output_is_only_a_preview() {
+        let mut inventory = Inventory::default();
+        let player = inventory.inventory_menu.as_player_mut();
+        player.craft[0] = ItemStack::new(ItemKind::OakLog, 2);
+        player.craft_result = ItemStack::new(ItemKind::OakPlanks, 4);
+        assert_eq!(
+            super::inventory_totals(&inventory),
+            BTreeMap::from([("minecraft:oak_log".into(), 2),])
+        );
+    }
+
+    #[test]
+    fn time_packet_uses_overworld_clock_not_game_time_or_other_clocks() {
+        use azalea::{
+            core::registry_holder::RegistryHolder,
+            protocol::packets::game::{ClientboundSetTime, c_set_time::ClockState},
+            registry::{DataRegistry, data::WorldClock},
+        };
+        let mut registries = RegistryHolder::default();
+        registries.append(
+            "minecraft:world_clock".parse().unwrap(),
+            vec![
+                ("example:other".parse().unwrap(), Some(Default::default())),
+                (
+                    "minecraft:overworld".parse().unwrap(),
+                    Some(Default::default()),
+                ),
+            ],
+        );
+        let mut packet = ClientboundSetTime {
+            game_time: 777,
+            clock_updates: Default::default(),
+        };
+        assert_eq!(super::day_time(&packet, &registries), None);
+        packet.clock_updates.insert(
+            WorldClock::new_raw(0),
+            ClockState {
+                total_ticks: 888,
+                partial_tick: 0.0,
+                rate: 1.0,
+            },
+        );
+        packet.clock_updates.insert(
+            WorldClock::new_raw(1),
+            ClockState {
+                total_ticks: 48_017,
+                partial_tick: 0.0,
+                rate: 0.0,
+            },
+        );
+        assert_eq!(super::day_time(&packet, &registries), Some(17));
+        assert_eq!(super::day_time(&packet, &RegistryHolder::default()), None);
+        packet.clock_updates.shift_remove(&WorldClock::new_raw(0));
+        assert_eq!(
+            super::day_time(&packet, &RegistryHolder::default()),
+            Some(17)
+        );
+    }
+
+    #[test]
+    fn raw_day_clock_ticks_are_normalized_to_one_day() {
+        assert_eq!(super::normalise_day_time(24_017), 17);
+        assert_eq!(super::normalise_day_time(48_000), 0);
+        assert!(super::normalise_day_time(23_999) < 24_000);
+    }
+
     #[test]
     fn full_hub_blocks_support_endpoints_but_partial_blocks_and_magma_do_not() {
         use azalea::registry::builtin::BlockKind;

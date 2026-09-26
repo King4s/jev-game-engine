@@ -136,6 +136,19 @@ async fn probe(
             .filter(|b| b.name.starts_with("waypoint:"))
             .count()
     );
+    // One JSON line with the Survival level-0 view, so an operator can check it at a glance.
+    println!(
+        "Observed survival view: {}",
+        serde_json::json!({
+            "time_of_day": observation.time_of_day,
+            "health": observation.health,
+            "food": observation.food,
+            "held_item": observation.held_item,
+            "items": observation.items,
+            "resources": observation.resources,
+            "note": observation.note,
+        })
+    );
     let local_move = args.iter().any(|s| s == "--local-move");
     if args.iter().any(|s| s == "--jev") || local_move {
         let mut candidates = vec![Candidate {
