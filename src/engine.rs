@@ -12,6 +12,13 @@ use crate::{
     model::*,
 };
 
+/// Pause reasons recorded when the observed world changes under a running session. Both
+/// are a local stop, not a failure: an operator (or the headless harness) resumes with
+/// `Start` once the new world is observed.
+pub const DIMENSION_CHANGED: &str = "Dimension changed: local stop and pending answers invalidated";
+pub const WORLD_LIFECYCLE_CHANGED: &str =
+    "World lifecycle changed: local stop and pending answers invalidated";
+
 #[derive(Clone)]
 pub struct EngineHandle {
     commands: mpsc::UnboundedSender<Command>,
@@ -488,9 +495,9 @@ impl Session {
                 self.view.observation = Some(observation.clone());
                 if world_changed {
                     self.fail(if dimension_changed {
-                        "Dimension changed: local stop and pending answers invalidated"
+                        DIMENSION_CHANGED
                     } else {
-                        "World lifecycle changed: local stop and pending answers invalidated"
+                        WORLD_LIFECYCLE_CHANGED
                     });
                     return;
                 }

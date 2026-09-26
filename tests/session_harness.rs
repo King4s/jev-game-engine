@@ -216,6 +216,46 @@ fn every_failure_has_its_own_non_zero_exit_code() {
     );
 }
 
+/// Regression for the first live night run, which ended as `provider_failed` 21 s in when
+/// the bot was moved from the hub into the test world: a world change is a local stop the
+/// harness resumes from, not the end of the session.
+#[test]
+fn a_world_change_while_connected_resumes_instead_of_ending_the_session() {
+    use harness::{ErrorOutcome, classify_error};
+    use jev_game_engine::engine::{DIMENSION_CHANGED, WORLD_LIFECYCLE_CHANGED};
+
+    for error in [DIMENSION_CHANGED, WORLD_LIFECYCLE_CHANGED] {
+        assert_eq!(classify_error(error, true), ErrorOutcome::Resume, "{error}");
+        assert_eq!(
+            classify_error(error, false),
+            ErrorOutcome::End(EndReason::Disconnected),
+            "a world change without a connection is a disconnect: {error}"
+        );
+    }
+    let cases = [
+        ("Request budget reached", true, EndReason::Budget),
+        ("Session time budget reached", true, EndReason::Budget),
+        (
+            "Session time budget reached",
+            false,
+            EndReason::Disconnected,
+        ),
+        (
+            "Adapter returned invalid observation values",
+            true,
+            EndReason::Disconnected,
+        ),
+        ("TypeSafe request failed", true, EndReason::ProviderFailed),
+    ];
+    for (error, connected, reason) in cases {
+        assert_eq!(
+            classify_error(error, connected),
+            ErrorOutcome::End(reason),
+            "{error} (connected {connected})"
+        );
+    }
+}
+
 fn decision(choice: &str, model: &str) -> Decision {
     Decision {
         choice: choice.into(),
