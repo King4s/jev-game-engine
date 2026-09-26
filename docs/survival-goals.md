@@ -69,11 +69,16 @@ The flee reflex stays as a last-resort safety net, not as a way of playing. The
 `wait`/`flee` selection policy work (Task 14) is parked until there are real goals to
 choose between.
 
-## Open decision before level 1
+## Platform and test setup
 
-Azalea (the Rust bot library the engine uses) already provides pathfinding, block
-breaking, inventory, containers and attacking. It has no ready-made crafting or block
-placement, so levels 1, 2 and 4 would need them built on top of container clicks and
-"use item on block". Mineflayer (JavaScript) has crafting, placing and collecting
-built in, and large Minecraft agents (Voyager, Mindcraft) are built on it. The owner
-decides whether to extend Azalea in Rust or to evaluate Mineflayer for the skill layer.
+The engine stays Rust on Azalea, as the project's own contract requires (no Node or
+TypeScript runtime). Azalea already provides pathfinding, block breaking, inventory,
+containers and attacking; crafting (container clicks on the 2×2 and 3×3 grids) and block
+placement ("use item on block") are built on top of it as part of levels 1, 2 and 4.
+
+The operator is only an observer in the test world and must never be what makes a level
+pass or fail. Where the server's multiplayer rules would let the observer block the bot,
+the test world is configured for the bot, or the observer is moved out of it. The known
+case: skipping the night needs `players_sleeping_percentage` low enough for the bot alone
+(the server default 100 would require the observer to sleep too); set it for the test
+world before level 4 runs and verify it did not change other worlds.
