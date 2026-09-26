@@ -230,3 +230,122 @@ fn rejected_server_content_is_not_reflected_in_errors() {
         assert!(!format!("{error:?}").contains(SECRET));
     }
 }
+
+#[test]
+fn a_distribution_that_does_not_sum_to_one_names_the_computed_sum() {
+    let mut value = response();
+    value["answers"]["action"]["probabilities"] = json!({"wait": 0.6, "waypoint_1": 0.3});
+    let error = validate_response(value, &candidates(), 1)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("sum 0.9000 over 2 options"),
+        "the sum is computed here, so it can be named: {error}"
+    );
+}
+
+fn candidates_named(ids: &[&str]) -> Vec<Candidate> {
+    ids.iter()
+        .map(|id| Candidate {
+            id: (*id).into(),
+            description: (*id).into(),
+            target: None,
+            duration_ms: 2_000,
+        })
+        .collect()
+}
+
+fn answer(choice: &str, probabilities: Value) -> Value {
+    json!({
+        "model": "jev-1.13.0",
+        "answers": {"action": {"type": "choice", "choice": choice,
+            "probabilities": probabilities}}
+    })
+}
+
+/// Live regression: TypeSafe rounds each probability to two decimals, so three equal
+/// options arrive as 0.33 each and sum to 0.99. That is a coherent answer.
+#[test]
+fn three_tied_options_rounded_to_two_decimals_are_accepted() {
+    let candidates = candidates_named(&["a", "b", "c"]);
+    let value = answer("b", json!({"a": 0.33, "b": 0.33, "c": 0.33}));
+    let decision = validate_response(value, &candidates, 1).unwrap();
+    assert_eq!(decision.choice, "b");
+    assert_eq!(
+        decision.probabilities["a"], 0.33,
+        "accepted answers are kept as received, not renormalised"
+    );
+}
+
+#[test]
+fn a_realistic_rounded_answer_over_many_options_is_accepted() {
+    let ids = [
+        "wait",
+        "flee_0",
+        "flee_1",
+        "flee_2",
+        "waypoint_0",
+        "waypoint_1",
+    ];
+    let candidates = candidates_named(&ids);
+    // True values 0.1666.. each round to 0.17: sum 1.02, off by 6 * 0.00333.
+    let tied = json!({"wait": 0.17, "flee_0": 0.17, "flee_1": 0.17,
+        "flee_2": 0.17, "waypoint_0": 0.17, "waypoint_1": 0.17});
+    assert!(validate_response(answer("flee_1", tied), &candidates, 1).is_ok());
+    // Five small options each rounded down to 0.0 or 0.01.
+    let skewed = json!({"wait": 0.01, "flee_0": 0.97, "flee_1": 0.0,
+        "flee_2": 0.0, "waypoint_0": 0.01, "waypoint_1": 0.0});
+    assert!(validate_response(answer("flee_0", skewed), &candidates, 1).is_ok());
+}
+
+#[test]
+fn clearly_broken_sums_are_still_rejected() {
+    let two = candidates_named(&["wait", "waypoint_1"]);
+    let low = answer("wait", json!({"wait": 0.6, "waypoint_1": 0.3}));
+    assert!(validate_response(low, &two, 1).is_err(), "sum 0.9");
+    let three = candidates_named(&["a", "b", "c"]);
+    let high = answer("a", json!({"a": 0.6, "b": 0.3, "c": 0.3}));
+    assert!(validate_response(high, &three, 1).is_err(), "sum 1.2");
+    // Just outside what three two-decimal roundings can explain.
+    let edge = answer("a", json!({"a": 0.34, "b": 0.33, "c": 0.31}));
+    assert!(validate_response(edge, &three, 1).is_err(), "sum 0.98");
+}
+
+#[test]
+fn a_rejected_sum_names_each_option_probability_for_diagnosis() {
+    let three = candidates_named(&["a", "b", "c"]);
+    let value = answer("a", json!({"a": 0.6, "b": 0.3, "c": 0.3}));
+    let error = validate_response(value, &three, 1).unwrap_err().to_string();
+    assert!(error.contains("sum 1.2000 over 3 options"), "{error}");
+    assert!(error.contains("a=0.6000, b=0.3000, c=0.3000"), "{error}");
+}
+
+#[test]
+fn the_total_rounding_allowance_is_capped_for_many_options() {
+    let twelve = candidates_named(&[
+        "c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11",
+    ]);
+
+    // Rejected: sum 1.06 is off by 0.06, exceeding the 0.05 cap.
+    // For 12 options: (0.005 * 12).min(0.05) = 0.06.min(0.05) = 0.05.
+    let over_cap = answer(
+        "c0",
+        json!({"c0": 0.18, "c1": 0.08, "c2": 0.08, "c3": 0.08,
+        "c4": 0.08, "c5": 0.08, "c6": 0.08, "c7": 0.08, "c8": 0.08, "c9": 0.08,
+        "c10": 0.08, "c11": 0.08}),
+    );
+    let error = validate_response(over_cap, &twelve, 1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("do not sum to one"), "error text: {error}");
+
+    // Accepted control: sum 1.04 is off by 0.04, within the 0.05 cap.
+    let within_cap = answer(
+        "c0",
+        json!({"c0": 0.16, "c1": 0.08, "c2": 0.08, "c3": 0.08,
+        "c4": 0.08, "c5": 0.08, "c6": 0.08, "c7": 0.08, "c8": 0.08, "c9": 0.08,
+        "c10": 0.08, "c11": 0.08}),
+    );
+    let decision = validate_response(within_cap, &twelve, 1).unwrap();
+    assert_eq!(decision.choice, "c0");
+}

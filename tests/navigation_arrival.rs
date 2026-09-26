@@ -163,6 +163,7 @@ fn fixture_waypoint(observation: &Observation) -> Position {
 fn observation() -> Observation {
     Observation {
         world_epoch: 1,
+        deaths: 0,
         dimension: Some("fixture:overworld".into()),
         sequence: 7,
         connected: true,

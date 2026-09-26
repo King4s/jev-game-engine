@@ -22,7 +22,9 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use crate::{
-    engine::EngineHandle,
+    engine::{
+        BOT_DIED, DIMENSION_CHANGED, EngineHandle, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED,
+    },
     model::{Command, Event, Mode, Observation, Position, Settings, View},
     origin::{ActionOrigin, event_origin},
     recording,
@@ -128,6 +130,8 @@ pub enum EndReason {
     Disconnected,
     /// The session neither ended nor failed inside the wall-clock guard.
     Stalled,
+    /// The bot's health reached zero.
+    Died,
 }
 
 impl EndReason {
@@ -140,6 +144,7 @@ impl EndReason {
             Self::ProviderFailed => 6,
             Self::Disconnected => 7,
             Self::Stalled => 8,
+            Self::Died => 9,
         }
     }
 }
@@ -161,6 +166,10 @@ pub struct Counts {
     pub accepted_actions: u32,
     pub arrival_verdicts: u32,
     pub arrived: u32,
+    /// Hits the engine recorded without stopping (reflex sessions only).
+    pub hits: u32,
+    /// Model answers that failed validation and were dropped without acting.
+    pub rejected_answers: u32,
 }
 
 /// Summary of one run: the counts, the movement and the end state.
@@ -195,6 +204,10 @@ pub fn counts(events: &[Event]) -> Counts {
         match event.kind.as_str() {
             "request" => counts.requests += 1,
             "action" => counts.accepted_actions += 1,
+            "hurt" => counts.hits += 1,
+            "rejected" if event.message.starts_with(crate::provider::REJECTED_ANSWER) => {
+                counts.rejected_answers += 1;
+            }
             "decision" => {
                 if let Some(decision) = &event.decision {
                     counts.answers += 1;
@@ -366,9 +379,62 @@ fn wait_for_observation(
     }
 }
 
+/// What the harness does with an error the engine recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorOutcome {
+    /// A world or dimension change, or damage the bot survived, while still connected: the
+    /// engine stopped locally and the harness resumes, as an operator would.
+    Resume,
+    /// The session is over for this reason.
+    End(EndReason),
+}
+
+/// Classifies an engine error. `health` is the latest observed health, if any. World changes
+/// and damage are matched exactly against the engine's own messages; everything else is
+/// classified by its text, and a lost connection is read from the observation, not from the
+/// text. Damage the bot survives is resumed so a survival objective can go on; no health
+/// left ends the session as `Died`.
+pub fn classify_error(error: &str, connected: bool, health: Option<f32>) -> ErrorOutcome {
+    let alive = health.is_some_and(|health| health > 0.0);
+    if error == BOT_DIED || (error == HEALTH_DECREASED && !alive) {
+        return ErrorOutcome::End(EndReason::Died);
+    }
+    if connected
+        && (error == DIMENSION_CHANGED
+            || error == WORLD_LIFECYCLE_CHANGED
+            || error == HEALTH_DECREASED)
+    {
+        return ErrorOutcome::Resume;
+    }
+    ErrorOutcome::End(if error.contains("budget reached") {
+        if connected {
+            EndReason::Budget
+        } else {
+            EndReason::Disconnected
+        }
+    } else if !connected
+        || error.contains("disconnect")
+        || error.contains("Adapter")
+        || error.contains("adapter")
+    {
+        EndReason::Disconnected
+    } else {
+        EndReason::ProviderFailed
+    })
+}
+
+/// After a resume, waits briefly for the engine to clear the error it resumed from, so the
+/// same pause is not answered with a second `Start`.
+fn wait_until_cleared(engine: &EngineHandle, error: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && engine.snapshot().last_error.as_deref() == Some(error) {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Waits until the engine ends the session. The engine records the end as an `error`
-/// event whose message names the budget; any other error is classified by its text, and
-/// a lost connection is read from the observation, not from the text.
+/// event whose message names the budget; a world change or survived damage is resumed
+/// rather than ended (see [`classify_error`]).
 fn wait_for_end(
     engine: &EngineHandle,
     settings: &Settings,
@@ -389,22 +455,24 @@ fn wait_for_end(
             .as_ref()
             .is_some_and(|observation| observation.connected);
         if let Some(error) = &view.last_error {
-            let reason = if error.contains("budget reached") {
-                if connected {
-                    EndReason::Budget
-                } else {
-                    EndReason::Disconnected
+            let health = view
+                .observation
+                .as_ref()
+                .map(|observation| observation.health);
+            match classify_error(error, connected, health) {
+                ErrorOutcome::Resume => {
+                    // The same step an operator takes in the UI: the engine has already
+                    // stopped locally and dropped stale answers; `Start` is recorded as a
+                    // `control` event, so the resume is visible in the recording.
+                    if verbose {
+                        println!("  harness: {error}; resuming");
+                    }
+                    engine.send(Command::Start);
+                    wait_until_cleared(engine, error);
+                    continue;
                 }
-            } else if !connected
-                || error.contains("disconnect")
-                || error.contains("Adapter")
-                || error.contains("adapter")
-            {
-                EndReason::Disconnected
-            } else {
-                EndReason::ProviderFailed
-            };
-            return (reason, error.clone());
+                ErrorOutcome::End(reason) => return (reason, error.clone()),
+            }
         }
         if !connected && settings.mode == Mode::Live {
             return (

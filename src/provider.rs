@@ -151,13 +151,19 @@ pub async fn decide(
         value,
         candidates,
         started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-    )?;
+    )
+    .map_err(|error| anyhow!("{REJECTED_ANSWER}{error}"))?;
     ensure!(
         !decision.model.contains(api_key),
         "TypeSafe returned invalid model metadata"
     );
     Ok(decision)
 }
+
+/// Prefix of every error for a response that arrived but failed validation. The engine
+/// drops such an answer and keeps the session running; transport, key and size errors
+/// carry no prefix and still end it.
+pub const REJECTED_ANSWER: &str = "TypeSafe answer rejected: ";
 
 /// Validates provider data without including untrusted response values in errors.
 pub fn validate_response(
@@ -200,16 +206,26 @@ pub fn validate_response(
         probabilities.insert(id.clone(), probability(raw)?);
     }
     let sum: f64 = probabilities.values().sum();
+    // TypeSafe rounds each probability to two decimals, so each option can be off by at
+    // most 0.005 (three ties arrive as 0.33 each, sum 0.99). The total allowance is capped
+    // at 0.05 so a many-option answer cannot hide a broken sum; 1e-9 absorbs f64 error.
+    // Accepted values are kept as received: nothing downstream relies on the sum.
+    let tolerance = (0.005 * probabilities.len() as f64).min(0.05) + 1e-9;
+    // The sum and per-option values are parsed numbers and the keys are our own
+    // candidate IDs (checked above), so naming them leaks no response text.
     ensure!(
-        (sum - 1.0).abs() <= 0.001,
-        "TypeSafe probabilities do not sum to one"
+        (sum - 1.0).abs() <= tolerance,
+        "TypeSafe probabilities do not sum to one (sum {sum:.4} over {} options: {})",
+        probabilities.len(),
+        describe(&probabilities)
     );
     let chosen_probability = probabilities[choice];
     ensure!(
         probabilities
             .values()
             .all(|p| *p <= chosen_probability + 1e-9),
-        "TypeSafe choice is inconsistent with probabilities"
+        "TypeSafe choice is inconsistent with probabilities (chose {choice}: {})",
+        describe(&probabilities)
     );
     let confidence = answer.get("confidence").map(probability).transpose()?;
     let model = value
@@ -252,6 +268,15 @@ pub fn validate_response(
     })
 }
 
+/// `id=0.3300, id=0.6700` for rejection messages; the IDs are our own candidate IDs.
+fn describe(probabilities: &BTreeMap<String, f64>) -> String {
+    probabilities
+        .iter()
+        .map(|(id, p)| format!("{id}={p:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn probability(value: &Value) -> Result<f64> {
     let probability = value
         .as_f64()
@@ -272,6 +297,7 @@ mod tests {
         Observation {
             world_epoch: 1,
             dimension: Some("fixture:overworld".into()),
+            deaths: 0,
             sequence: 1,
             connected: true,
             position: Position {

@@ -43,7 +43,8 @@ session-run: one budgeted multi-goal session, headless, through the real engine.
 
 Exit codes: 0 the session ended on its own budget while connected, 1 connection failure,
 2 invalid arguments or missing key, 6 provider failure, 7 the bot disconnected during the
-session, 8 the session neither ended nor failed inside the wall-clock guard.
+session, 8 the session neither ended nor failed inside the wall-clock guard, 9 the bot died.
+A world change or damage the bot survives is a local stop the harness resumes.
 The harness never edits blocks and never changes server configuration.";
 
 fn main() {

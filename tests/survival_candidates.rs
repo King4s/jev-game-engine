@@ -6,8 +6,8 @@
 
 use jev_game_engine::model::{Landmark, Observation, Position};
 use jev_game_engine::survival::{
-    MAX_FLEE_CANDIDATES, THREAT_RADIUS_M, flee_candidates, is_hostile, nearest_threat,
-    nearest_threat_within,
+    MAX_FLEE_CANDIDATES, RANGED_THREAT_RADIUS_M, REFLEX_RADIUS_M, THREAT_RADIUS_M, flee_candidates,
+    is_hostile, is_ranged, nearest_threat, nearest_threat_within,
 };
 
 fn landmark(name: &str, x: f64, y: f64, z: f64) -> Landmark {
@@ -20,6 +20,7 @@ fn landmark(name: &str, x: f64, y: f64, z: f64) -> Landmark {
 fn observation(entities: Vec<Landmark>, blocks: Vec<Landmark>) -> Observation {
     Observation {
         world_epoch: 1,
+        deaths: 0,
         dimension: Some("minecraft:overworld".into()),
         sequence: 7,
         connected: true,
@@ -147,5 +148,51 @@ fn flight_goals_are_capped_and_the_duration_is_clamped_like_any_other_goal() {
     assert_eq!(
         candidates[0].duration_ms, 10_000,
         "clamped to the engine bound"
+    );
+}
+
+#[test]
+fn shooters_are_threats_out_to_their_own_range_and_melee_mobs_are_not() {
+    for name in ["Skeleton", "Stray", "Bogged", "Pillager", "skeleton"] {
+        assert!(is_ranged(name), "{name}");
+    }
+    for name in ["Zombie", "Creeper", "Spider", "Cow", ""] {
+        assert!(!is_ranged(name), "{name}");
+    }
+    let at =
+        |name: &str, distance: f64| observation(vec![landmark(name, distance, 64.0, 0.0)], vec![]);
+    // 14 blocks: outside the 12-block request radius and the 6-block reflex radius.
+    assert!(nearest_threat(&at("Skeleton", 14.0)).is_some());
+    assert!(nearest_threat_within(&at("Skeleton", 14.0), REFLEX_RADIUS_M).is_some());
+    assert!(nearest_threat(&at("Zombie", 14.0)).is_none());
+    assert!(nearest_threat_within(&at("Zombie", 14.0), REFLEX_RADIUS_M).is_none());
+    assert!(nearest_threat(&at("Skeleton", RANGED_THREAT_RADIUS_M + 0.5)).is_none());
+}
+
+#[test]
+fn from_a_shooter_the_bot_runs_across_the_line_of_fire_and_keeps_running() {
+    // Skeleton 10 blocks north (negative z). Candidate cells: straight away (south),
+    // across (east), a short hop across, and one that closes the distance.
+    let blocks = vec![
+        landmark("waypoint:0:64:8", 0.5, 64.0, 8.5),
+        landmark("waypoint:8:64:0", 8.5, 64.0, 0.5),
+        landmark("waypoint:1:64:0", 1.5, 64.0, 0.5),
+        landmark("waypoint:0:64:-4", 0.5, 64.0, -3.5),
+    ];
+    let observation = observation(vec![landmark("Skeleton", 0.5, 64.0, -9.5)], blocks);
+
+    let candidates = flee_candidates(&observation, 2_000);
+    let ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["flee_1", "flee_0"],
+        "across first, straight away second, no short hop, never toward the shooter"
+    );
+    assert!(candidates[0].description.contains("line of fire"));
+    // 8.5 blocks at the assumed 2 m/s is 4.25 s: the goal outlasts the run.
+    assert!(
+        candidates[0].duration_ms >= 4_000,
+        "{}",
+        candidates[0].duration_ms
     );
 }

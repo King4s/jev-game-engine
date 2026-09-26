@@ -711,6 +711,7 @@ mod tests {
         let observation = Observation {
             sequence: 7,
             world_epoch: 1,
+            deaths: 0,
             dimension: Some("fixture:overworld".into()),
             connected: true,
             position: Position {

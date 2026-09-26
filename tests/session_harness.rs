@@ -204,6 +204,7 @@ fn every_failure_has_its_own_non_zero_exit_code() {
         EndReason::ProviderFailed,
         EndReason::Disconnected,
         EndReason::Stalled,
+        EndReason::Died,
     ];
     let codes: Vec<i32> = reasons.iter().map(|reason| reason.exit_code()).collect();
     assert_eq!(codes[0], 0, "only a budget end is a success");
@@ -214,6 +215,67 @@ fn every_failure_has_its_own_non_zero_exit_code() {
         reasons.len(),
         "codes must be distinct: {codes:?}"
     );
+}
+
+/// Regression for the first live night run, which ended as `provider_failed` 21 s in when
+/// the bot was moved from the hub into the test world: a world change is a local stop the
+/// harness resumes from, not the end of the session. Damage the bot survives is resumed too,
+/// so a survival objective goes on; no health left is its own end reason.
+#[test]
+fn a_world_change_while_connected_resumes_instead_of_ending_the_session() {
+    use harness::{ErrorOutcome, classify_error};
+    use jev_game_engine::engine::{
+        BOT_DIED, DIMENSION_CHANGED, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED,
+    };
+
+    let alive = Some(20.0);
+    for error in [DIMENSION_CHANGED, WORLD_LIFECYCLE_CHANGED, HEALTH_DECREASED] {
+        assert_eq!(
+            classify_error(error, true, alive),
+            ErrorOutcome::Resume,
+            "{error}"
+        );
+        assert_eq!(
+            classify_error(error, false, alive),
+            ErrorOutcome::End(EndReason::Disconnected),
+            "a world change without a connection is a disconnect: {error}"
+        );
+    }
+    let cases = [
+        ("Request budget reached", true, EndReason::Budget),
+        ("Session time budget reached", true, EndReason::Budget),
+        (
+            "Session time budget reached",
+            false,
+            EndReason::Disconnected,
+        ),
+        (
+            "Adapter returned invalid observation values",
+            true,
+            EndReason::Disconnected,
+        ),
+        ("TypeSafe request failed", true, EndReason::ProviderFailed),
+    ];
+    for (error, connected, reason) in cases {
+        assert_eq!(
+            classify_error(error, connected, alive),
+            ErrorOutcome::End(reason),
+            "{error} (connected {connected})"
+        );
+    }
+    // The adapter's death count ends the session even when the respawned bot is healthy
+    // and connected in another world, which is what the live run hid as a world change.
+    assert_eq!(
+        classify_error(BOT_DIED, true, alive),
+        ErrorOutcome::End(EndReason::Died)
+    );
+    for (connected, health) in [(true, Some(0.0)), (false, Some(0.0)), (true, None)] {
+        assert_eq!(
+            classify_error(HEALTH_DECREASED, connected, health),
+            ErrorOutcome::End(EndReason::Died),
+            "connected {connected}, health {health:?}"
+        );
+    }
 }
 
 fn decision(choice: &str, model: &str) -> Decision {

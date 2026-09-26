@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
     };
     let observation = Observation {
         world_epoch: 1,
+        deaths: 0,
         dimension: Some("fixture:overworld".into()),
         sequence: 1,
         connected: false,
