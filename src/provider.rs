@@ -206,18 +206,26 @@ pub fn validate_response(
         probabilities.insert(id.clone(), probability(raw)?);
     }
     let sum: f64 = probabilities.values().sum();
-    // The sum is computed here, not copied from the response, so naming it leaks nothing.
+    // TypeSafe rounds each probability to two decimals, so each option can be off by at
+    // most 0.005 (three ties arrive as 0.33 each, sum 0.99). The total allowance is capped
+    // at 0.05 so a many-option answer cannot hide a broken sum; 1e-9 absorbs f64 error.
+    // Accepted values are kept as received: nothing downstream relies on the sum.
+    let tolerance = (0.005 * probabilities.len() as f64).min(0.05) + 1e-9;
+    // The sum and per-option values are parsed numbers and the keys are our own
+    // candidate IDs (checked above), so naming them leaks no response text.
     ensure!(
-        (sum - 1.0).abs() <= 0.001,
-        "TypeSafe probabilities do not sum to one (sum {sum:.4} over {} options)",
-        probabilities.len()
+        (sum - 1.0).abs() <= tolerance,
+        "TypeSafe probabilities do not sum to one (sum {sum:.4} over {} options: {})",
+        probabilities.len(),
+        describe(&probabilities)
     );
     let chosen_probability = probabilities[choice];
     ensure!(
         probabilities
             .values()
             .all(|p| *p <= chosen_probability + 1e-9),
-        "TypeSafe choice is inconsistent with probabilities"
+        "TypeSafe choice is inconsistent with probabilities (chose {choice}: {})",
+        describe(&probabilities)
     );
     let confidence = answer.get("confidence").map(probability).transpose()?;
     let model = value
@@ -258,6 +266,15 @@ pub fn validate_response(
         output_tokens: tokens("output_tokens")?,
         latency_ms,
     })
+}
+
+/// `id=0.3300, id=0.6700` for rejection messages; the IDs are our own candidate IDs.
+fn describe(probabilities: &BTreeMap<String, f64>) -> String {
+    probabilities
+        .iter()
+        .map(|(id, p)| format!("{id}={p:.4}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn probability(value: &Value) -> Result<f64> {
