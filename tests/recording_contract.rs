@@ -48,6 +48,7 @@ fn recording() -> Recording {
                 output_tokens: Some(2),
                 latency_ms: 300,
             }),
+            arrival: None,
         }],
     }
 }

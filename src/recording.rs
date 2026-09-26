@@ -98,6 +98,24 @@ pub fn validate(recording: &Recording) -> Result<()> {
         if let Some(decision) = &event.decision {
             validate_decision(decision, &event.candidates, &recording.settings.mode)?;
         }
+        if let Some(arrival) = &event.arrival {
+            ensure!(
+                event.kind == "executor",
+                "Arrival verdict outside an executor event"
+            );
+            ensure!(
+                arrival.tolerance_m.is_finite() && arrival.tolerance_m > 0.0,
+                "Invalid arrival tolerance"
+            );
+            ensure!(
+                arrival.measured_distance_m.is_none_or(f64::is_finite),
+                "Invalid measured arrival distance"
+            );
+            ensure!(
+                !arrival.arrived || arrival.measured_distance_m.is_some(),
+                "Recorded arrival without a measured distance"
+            );
+        }
     }
     Ok(())
 }

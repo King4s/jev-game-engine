@@ -185,3 +185,12 @@ Report fixtures, real game connections and real Jev inference separately. Missin
 - [ ] Criteria have concrete evidence; mocks are not described as live verification.
 - [ ] Document a real Minecraft/Jev run before calling the MVP live-verified.
 - [ ] The next phase is FS25 in a separate test save, with its own integration experiment.
+
+## Task 13: In-game usage overlay (requested 2026-09-26, not started)
+
+The operator wants to see Jev and LLM usage as small graphs **while watching the bot in Minecraft**, not only in the separate engine window. The engine already records what the graphs need: every `decision` event carries `latency_ms`, `input_tokens` and `output_tokens`, the `request` count and the latency percentiles are on the `View`, and the engine's own safety-reflex actions are labelled separately from model answers.
+
+- [ ] Decide the rendering path. Two honest options, both outside the current engine window: (a) a **desktop overlay**: a second borderless, always-on-top, click-through egui/eframe window the operator drags over the Minecraft client; works with an unmodified game and reuses the existing `View`; fails only when the game runs exclusive full-screen. (b) an **in-client overlay**: a small Fabric/Paper-side HUD (boss bar, action bar or a HUD mod) fed by the engine over a loopback socket; renders inside the game but needs a client mod or server plugin the operator installs. Start with (a) unless the operator wants (b).
+- [ ] Graphs to show, each as a sparkline over the last N requests: requests per minute against the pacing setting, answer latency (p50/p95 lines), tokens per request (input and output), the running share of `wait` versus navigation versus `flee` answers, and reflex actions as marks on the time axis. Numbers come from recorded events, so the overlay and a recording replay show the same series.
+- [ ] Keep the overlay read-only: no controls that could send a command from a window the operator cannot see clearly, and no API key or private identifier on screen.
+- [ ] Offline evidence: a headless egui test renders the overlay from a fixture recording; a screenshot from the fixture session documents it. Live evidence is a screenshot over the real client, labelled as such.

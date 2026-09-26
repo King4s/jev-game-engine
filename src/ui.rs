@@ -1,7 +1,8 @@
 use eframe::egui::{self, Color32, RichText, Stroke, Vec2};
 use jev_game_engine::{
     engine::EngineHandle,
-    model::{Command, Event, Mode, Observation, Settings, View},
+    model::{Command, Event, FixtureWaypoint, Mode, Observation, Settings, View},
+    origin::event_origin,
 };
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,11 @@ pub struct GameApp {
     selected: Option<u64>,
     event_page: usize,
     screenshot_path: Option<String>,
+    screenshot_after_goal: Option<String>,
+    verdict_step_sent: bool,
+    details_open: bool,
+    verdict_frames: u32,
+    tall_window: bool,
     screenshot_requested: bool,
     screenshot_status: Option<String>,
     opened_at: Instant,
@@ -28,6 +34,7 @@ impl GameApp {
         settings: Settings,
         auto_connect: bool,
         screenshot_path: Option<String>,
+        screenshot_after_goal: Option<String>,
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let engine = EngineHandle::new();
@@ -41,6 +48,11 @@ impl GameApp {
             selected: None,
             event_page: 0,
             screenshot_path,
+            screenshot_after_goal,
+            verdict_step_sent: false,
+            details_open: false,
+            verdict_frames: 0,
+            tall_window: false,
             screenshot_requested: false,
             screenshot_status: None,
             opened_at: Instant::now(),
@@ -50,9 +62,66 @@ impl GameApp {
 
     fn capture_frame(&mut self, ctx: &egui::Context, view: &View) {
         self.frame_count += 1;
-        if self.screenshot_path.is_none() {
+        let after_goal = self.screenshot_after_goal.is_some();
+        if self.screenshot_path.is_none() && !after_goal {
             return;
         }
+        // One offline decision is enough to produce a verdict, and the fixture answers it
+        // without a provider call. Live mode is never stepped from here: the operator starts the
+        // agent, and this gate only waits for the verdict that run records.
+        if after_goal
+            && !self.verdict_step_sent
+            && self.settings.mode == Mode::Demo
+            && view.observation.is_some()
+        {
+            self.engine.send(Command::Step);
+            self.verdict_step_sent = true;
+        }
+        let verdict_seen = view.events.iter().any(|event| event.arrival.is_some());
+        if after_goal && verdict_seen {
+            // Put the verdict itself on screen: select the event that carries it and open the
+            // detail panel, so the captured image contains the measured numbers instead of only
+            // the executor row.
+            self.selected = view
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.arrival.is_some())
+                .map(|event| event.sequence);
+            self.details_open = true;
+            if !self.tall_window {
+                // The verdict panel sits under the decision trace and would otherwise fall
+                // below the window edge, so the capture would miss the measured numbers.
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1100.0, 1150.0)));
+                self.tall_window = true;
+            }
+            // This runs after the frame has been laid out, so the request must wait until the
+            // resized window and the opened panel have actually been drawn; otherwise the
+            // capture shows an earlier frame.
+            self.verdict_frames = self.verdict_frames.saturating_add(1);
+        }
+        let bound = if after_goal {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(20)
+        };
+        let ready = if after_goal {
+            (verdict_seen && self.verdict_frames >= 8) || self.opened_at.elapsed() >= bound
+        } else {
+            self.settings.mode != Mode::Live
+                || view.observation.is_some()
+                || view.last_error.is_some()
+                || self.opened_at.elapsed() >= bound
+        };
+        let gate = if after_goal {
+            if verdict_seen {
+                "after an arrival verdict"
+            } else {
+                "at the 30 s bound without an arrival verdict"
+            }
+        } else {
+            "at the first observation"
+        };
         let capture = ctx.input(|input| {
             input.events.iter().find_map(|event| {
                 if let egui::Event::Screenshot { image, .. } = event {
@@ -63,7 +132,12 @@ impl GameApp {
             })
         });
         if let Some(capture) = capture {
-            if let Some(path) = self.screenshot_path.take() {
+            let path = if after_goal {
+                self.screenshot_after_goal.take()
+            } else {
+                self.screenshot_path.take()
+            };
+            if let Some(path) = path {
                 let result = (|| -> Result<(), Box<dyn std::error::Error>> {
                     let target = std::path::Path::new(&path);
                     if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -85,7 +159,7 @@ impl GameApp {
                     Ok(())
                 })();
                 self.screenshot_status = Some(match result {
-                    Ok(()) => format!("UI screenshot saved: {path}"),
+                    Ok(()) => format!("UI screenshot saved {gate}: {path}"),
                     Err(error) => format!("Could not save UI screenshot: {error}"),
                 });
                 if let Some(status) = &self.screenshot_status {
@@ -95,10 +169,7 @@ impl GameApp {
         } else if !self.screenshot_requested
             && self.frame_count >= 5
             && self.opened_at.elapsed() >= Duration::from_millis(500)
-            && (self.settings.mode != Mode::Live
-                || view.observation.is_some()
-                || view.last_error.is_some()
-                || self.opened_at.elapsed() >= Duration::from_secs(20))
+            && ready
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             self.screenshot_requested = true;
@@ -117,15 +188,49 @@ impl GameApp {
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Max. model requests");
-                ui.add(egui::DragValue::new(&mut self.settings.max_requests).range(1..=1000));
+                ui.add(egui::DragValue::new(&mut self.settings.max_requests).range(1..=100_000));
                 ui.label("Max. seconds");
-                ui.add(egui::DragValue::new(&mut self.settings.max_seconds).range(1..=3600));
+                ui.add(egui::DragValue::new(&mut self.settings.max_seconds).range(1..=604_800));
+                ui.label("Pacing (s)");
+                let mut pacing = self.settings.request_interval_ms / 1_000;
+                if ui
+                    .add(egui::DragValue::new(&mut pacing).range(0..=86_400))
+                    .changed()
+                {
+                    self.settings.request_interval_ms = pacing * 1_000;
+                }
                 if ui.button("Connect with these settings").clicked() {
                     self.selected = None;
                     self.engine.send(Command::Connect(self.settings.clone()));
                 }
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Session objective");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings.objective)
+                        .desired_width(420.0)
+                        .hint_text("e.g. Survive the night and keep health"),
+                );
+                ui.checkbox(
+                    &mut self.settings.safety_reflex,
+                    "Engine safety reflex (engine-initiated flight goals)",
+                );
+            });
             ui.checkbox(&mut self.settings.legacy_forwarding, "Legacy forwarding for an authorized bot server");
+            let mut reachable = self.settings.fixture_waypoint == FixtureWaypoint::Reachable;
+            if ui
+                .checkbox(
+                    &mut reachable,
+                    "Reachable fixture waypoint (offline demo arrives instead of expiring)",
+                )
+                .changed()
+            {
+                self.settings.fixture_waypoint = if reachable {
+                    FixtureWaypoint::Reachable
+                } else {
+                    FixtureWaypoint::Distant
+                };
+            }
             ui.small("Live uses a separate bot player on a compatible local server. Settings apply when connecting.");
         });
     }
@@ -238,6 +343,20 @@ impl GameApp {
                 .size(18.0),
         );
         ui.small("Jev selects the goal. The Rust executor handles local movement and stopping.");
+        ui.small(format!(
+            "Session objective: {}",
+            if view.objective.is_empty() {
+                "none"
+            } else {
+                view.objective.as_str()
+            }
+        ));
+        if view.reflexes > 0 {
+            ui.small(format!(
+                "Engine safety-reflex actions this session: {}",
+                view.reflexes
+            ));
+        }
         ui.add_space(8.0);
         let ms = |value: Option<u64>| {
             value
@@ -329,10 +448,15 @@ impl GameApp {
                     );
                 }
                 for event in view.events.iter().rev().skip(self.event_page * 100).take(100) {
+                    let origin = match event_origin(event) {
+                        Some(origin) => format!("{}   ", origin.label()),
+                        None => String::new(),
+                    };
                     let title = format!(
-                        "#{:04}   {:>6.1}s   {}   {}",
+                        "#{:04}   {:>6.1}s   {}{}   {}",
                         event.sequence,
                         event.elapsed_ms as f64 / 1000.0,
+                        origin,
                         event.kind,
                         event.message
                     );
@@ -349,12 +473,19 @@ impl GameApp {
             .and_then(|id| view.events.iter().find(|e| e.sequence == id))
             .or_else(|| view.events.last());
         if let Some(event) = selected {
-            egui::CollapsingHeader::new(if self.selected.is_some() {
+            let title = if self.selected.is_some() {
                 "Historical event · details"
             } else {
                 "Latest event · details"
-            })
-            .show(ui, |ui| event_detail(ui, event));
+            };
+            if self.details_open {
+                // Only the screenshot gate sets this, so the captured image contains the
+                // verdict and its measured numbers instead of a collapsed header.
+                ui.label(title);
+                event_detail(ui, event);
+            } else {
+                egui::CollapsingHeader::new(title).show(ui, |ui| event_detail(ui, event));
+            }
         }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -466,6 +597,24 @@ fn event_detail(ui: &mut egui::Ui, event: &Event) {
             candidate.id, candidate.description, candidate.duration_ms
         ));
     }
+    if let Some(arrival) = &event.arrival {
+        let arrived = arrival.arrived;
+        let verdict = if arrived { "arrived" } else { "expired" };
+        let measured = arrival
+            .measured_distance_m
+            .map(|distance| format!("{distance:.2} m"))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let target = arrival
+            .target
+            .as_ref()
+            .map(|target| format!("({:.2}, {:.2}, {:.2})", target.x, target.y, target.z))
+            .unwrap_or_else(|| "no bound target".to_owned());
+        let tolerance = format!("{:.2} m", arrival.tolerance_m);
+        ui.label(format!(
+            "Arrival: {verdict} · measured {measured} / tolerance {tolerance} · target {target} · elapsed {} ms / duration {} ms",
+            arrival.elapsed_ms, arrival.duration_ms
+        ));
+    }
     egui::ScrollArea::vertical()
         .id_salt("event_json")
         .max_height(220.0)
@@ -546,10 +695,15 @@ mod tests {
             selected: None,
             event_page: 0,
             screenshot_path: None,
+            screenshot_after_goal: None,
             screenshot_requested: false,
             screenshot_status: None,
             opened_at: Instant::now(),
             frame_count: 0,
+            verdict_step_sent: false,
+            details_open: false,
+            verdict_frames: 0,
+            tall_window: false,
         }
     }
 
@@ -603,6 +757,7 @@ mod tests {
                     output_tokens: None,
                     latency_ms: 300,
                 }),
+                arrival: None,
             }],
             ..View::default()
         }
@@ -725,6 +880,102 @@ mod tests {
         }
     }
 
+    /// The timeline labels a safety-reflex action through the shared attribution rule, so
+    /// an engine-initiated flight goal is never shown as the model's or the fixture's choice.
+    #[test]
+    fn timeline_labels_reflex_rows_safety_reflex_and_fixture_rows_fixture() {
+        let mut application = app();
+        let mut view = connected_fixture();
+        let template = view.events[0].clone();
+        view.events.push(Event {
+            sequence: 2,
+            elapsed_ms: 900,
+            kind: "reflex".into(),
+            message: "Engine safety action: Zombie is 3.0 blocks away; no goal in flight and fleeing via flee_0".into(),
+            observation: None,
+            candidates: vec![],
+            decision: None,
+            arrival: None,
+        });
+        view.events.push(Event {
+            sequence: 3,
+            elapsed_ms: 950,
+            kind: "dispatched".into(),
+            message: "SAFETY-REFLEX; engine-initiated bounded action; queued for adapter validation: flee_0".into(),
+            observation: None,
+            candidates: vec![],
+            decision: None,
+            arrival: None,
+        });
+        view.events.push(Event {
+            sequence: 4,
+            elapsed_ms: 1_000,
+            kind: "action".into(),
+            message: "SAFETY-REFLEX; engine-initiated bounded action; adapter accepted bounded action: flee_0".into(),
+            ..template.clone()
+        });
+        view.events[3].decision = None;
+        view.events[3].observation = None;
+        let context = egui::Context::default();
+        let mut rows: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1100.0, 780.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| application.timeline(ui, &view),
+            );
+            rows.clear();
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && text.galley.job.text.starts_with('#')
+                {
+                    rows.push(text.galley.job.text.clone());
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+        let row = |sequence: &str| {
+            rows.iter()
+                .find(|row| row.starts_with(sequence))
+                .unwrap_or_else(|| panic!("row {sequence} must render; rows: {rows:?}"))
+                .clone()
+        };
+        assert!(
+            row("#0001").contains("FIXTURE   decision"),
+            "{}",
+            row("#0001")
+        );
+        assert!(
+            row("#0002").contains("SAFETY-REFLEX   reflex"),
+            "{}",
+            row("#0002")
+        );
+        assert!(
+            row("#0003").contains("SAFETY-REFLEX   dispatched"),
+            "{}",
+            row("#0003")
+        );
+        assert!(
+            row("#0004").contains("SAFETY-REFLEX   action"),
+            "{}",
+            row("#0004")
+        );
+        for sequence in ["#0002", "#0003", "#0004"] {
+            let text = row(sequence);
+            assert!(
+                !text.contains("JEV-SELECTED")
+                    && !text.contains("FIXTURE")
+                    && !text.contains("MANUAL"),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn oldest_event_in_large_recording_is_visible_and_selectable() {
         let mut application = app();
@@ -734,6 +985,7 @@ mod tests {
             .map(|sequence| Event {
                 sequence,
                 message: format!("Recorded event {sequence}"),
+                arrival: None,
                 ..template.clone()
             })
             .collect();

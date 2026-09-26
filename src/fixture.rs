@@ -6,7 +6,40 @@ use crate::{
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
+/// Waypoint geometry of [`spawn`]: 5.657 blocks from the origin.
+///
+/// The fixture closes 0.1 blocks per 50 ms tick, so 2 blocks per second. At that rate this
+/// waypoint is further away than one bounded demo goal (`goal_ms` 2000 closes at most 4.0
+/// blocks) can reach, which is what lets [`spawn`] demonstrate the honest expiry path.
+/// Adapter-level tests that need a goal to expire use it deliberately.
+pub const DISTANT_WAYPOINT: Position = Position {
+    x: 4.,
+    y: 64.,
+    z: 4.,
+};
+
+/// Waypoint geometry for tests and tools that need one bounded goal to arrive: 1.5 blocks
+/// from the origin.
+///
+/// One bounded goal closes the remaining 0.9 blocks in roughly 0.45 s, so the same 2000 ms
+/// bound that expires against [`DISTANT_WAYPOINT`] records a genuine `arrived` verdict here.
+/// The waypoint stays outside the arrival tolerance, so it is offered as a navigate
+/// candidate instead of being filtered out. The desktop app's offline demo uses
+/// [`DISTANT_WAYPOINT`] instead, on purpose.
+pub const REACHABLE_WAYPOINT: Position = Position {
+    x: 1.5,
+    y: 64.,
+    z: 0.,
+};
+
+/// Synthetic fixture with the distant waypoint, unchanged for adapter-level tests.
 pub fn spawn() -> AdapterHandle {
+    spawn_with_waypoint(DISTANT_WAYPOINT)
+}
+
+/// Synthetic fixture with an explicit waypoint geometry, so a test or tool chooses whether a
+/// bounded goal arrives or expires. The bot starts at the origin either way.
+pub fn spawn_with_waypoint(waypoint: Position) -> AdapterHandle {
     let (commands, mut rx) = mpsc::unbounded_channel();
     let (tx, observations) = watch::channel(None);
     let (error_tx, errors) = watch::channel(None);
@@ -27,11 +60,7 @@ pub fn spawn() -> AdapterHandle {
             inventory: vec![],
             blocks: vec![Landmark {
                 name: "waypoint".into(),
-                position: Position {
-                    x: 4.,
-                    y: 64.,
-                    z: 4.,
-                },
+                position: waypoint,
             }],
             entities: vec![],
             note: "Synthetic offline fixture; no Minecraft connection".into(),

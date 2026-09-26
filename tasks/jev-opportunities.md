@@ -20,6 +20,8 @@ TypeSafe provides Choice for bounded selections, Score for described degrees, an
 
 **Guard:** an unknown goal starts nothing; the goal type must exist, the target must still be observed and every action limit applies. In the current navigation MVP, “build a house” therefore cannot be accepted. A known goal can be broken down by a code-based recipe; arbitrary plan generation is outside this proposal.
 
+**Status (2026-09-26):** a narrower form exists. `Settings::objective` carries the operator's free text to the model as structured state and names it in the instructions, but Jev still answers the same bounded Choice over engine-built candidates; there is no goal-type Choice, no target-ID Choice and no registry. It has offline tests and no live measurement of whether a stated objective changes what Jev picks.
+
 **Low-cost evaluation:** 40 Danish/English phrasings with manually labeled goals, including ambiguous and unsupported requests. Compare accuracy, rejection of unknown goals and request count/latency against a dropdown with simple aliases. Keep the dropdown as a direct alternative.
 
 ### 2. Strategy selection after blockage — first additional MVP candidate
@@ -49,6 +51,16 @@ Rust scans manifests, registry entries and versions deterministically, potential
 ### 6. Adaptive latency policy — keep in Rust
 
 p50/p95, timeout, jitter, observation age, replanning interval and macro duration are measurable quantities with explicit limits. Having Jev calculate them adds another slow and uncertain stage. Use a deterministic policy and test injected response times. Later, Jev may prioritize different already-safe strategies based on a natural-language request; it must not change freshness requirements, budgets or stopping guarantees.
+
+## Observations from the first live navigation session
+
+Measured, not proposed: two recorded sessions against a loopback test server — the 30-request navigation session (154 events) and a 2026-09-26 distance measurement — are the basis for these, and each is evidence about a proposal above rather than a new claim.
+
+- **The operator cannot express a goal, and the model rarely attempts one.** 27 of the 30 answers were `wait`; the three that chose a waypoint did so with 0.41–0.43 against a `wait` of 0.39–0.40. A request carries only an observation and the legal candidates, so what gets attempted rests on the model's reading of the prompt. This is the strongest argument for proposal 1 — a stated target would replace a near-tie with an intent.
+- **A doubtful distribution ended a session.** An earlier session stopped safely instead of acting because the returned probabilities failed the sum-to-one check (±0.001). Whether a near-normalised answer should be refused and retried inside the budget, or end the session as it does now, is an open policy question; changing it is a separate documented decision, not a bug fix.
+- **Stopping and arriving held in the live path.** All three navigation actions that ran arrived — 0.1451 m, 0.0281 m and 0.0945 m against the 0.6 m tolerance — with no manual takeover recorded, so the local stop and the arrival arithmetic are not fixture-only behaviour.
+- **A recording is unreadable until its rows say who acted.** The session interleaves model choices, local execution and engine bookkeeping; `origin::event_origin` was added because reading that back required guessing from message text. Any future adapter will need the same attribution before its recordings can be reviewed.
+- **One goal reaches about four blocks, and far from the waypoint grid there is no goal at all (measured 2026-09-26).** With the bot standing far outside the waypoint grid in the test world, the observation still held 196 blocks but **no `waypoint:` landmark inside the 12 blocks `candidates()` filters on**, so the request carried exactly one candidate, `wait`, and the engine logged the reason itself: `no navigate candidate: 0 observed waypoints`. (The operator's position was read without its world that time, so no distance between bot and operator is claimed from that run.) Each candidate's `duration_ms` is the latency-derived goal horizon (~2.1 s ≈ 4 blocks at 2 blocks/s), so even an offered goal is a short hop, and no field, flag or adapter path states a distant target. That makes this the binding version of proposal 1: either the operator (or the engine) states a target with its own duration, or the honest product boundary is that this is a step-at-a-time controller — a decision to take deliberately, not by default.
 
 ## Shared decision contract
 

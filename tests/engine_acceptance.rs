@@ -199,6 +199,7 @@ fn replay_is_immutable_even_when_play_and_manual_commands_are_sent() {
             observation: None,
             candidates: vec![],
             decision: None,
+            arrival: None,
         }],
     };
     let original = serde_json::to_vec(&recording).unwrap();

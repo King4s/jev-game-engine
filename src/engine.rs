@@ -94,6 +94,10 @@ struct Session {
     id: String,
     latency: LatencyPolicy,
     observed_at: Instant,
+    /// Earliest instant the paced model loop may issue its next request.
+    next_request_at: Instant,
+    /// When the safety reflex last dispatched an action.
+    last_reflex_at: Option<Instant>,
 }
 
 impl Session {
@@ -117,6 +121,8 @@ impl Session {
             id: session_id(),
             latency: LatencyPolicy::default(),
             observed_at: Instant::now(),
+            next_request_at: Instant::now(),
+            last_reflex_at: None,
         }
     }
 
@@ -185,6 +191,19 @@ impl Session {
         candidates: Vec<Candidate>,
         decision: Option<Decision>,
     ) {
+        self.event_with_arrival(kind, message, candidates, decision, None);
+    }
+
+    /// Records an event together with the local arrival verdict, when the event ends
+    /// a bounded navigation action.
+    fn event_with_arrival(
+        &mut self,
+        kind: &str,
+        message: impl Into<String>,
+        candidates: Vec<Candidate>,
+        decision: Option<Decision>,
+        arrival: Option<ArrivalVerdict>,
+    ) {
         if self.view.events.len() >= 4_999 {
             self.invalidate(true);
             self.view.status = "Stopped: event budget reached".into();
@@ -197,6 +216,7 @@ impl Session {
                     observation: self.view.observation.clone(),
                     candidates: vec![],
                     decision: None,
+                    arrival: None,
                 });
             }
             return;
@@ -209,6 +229,7 @@ impl Session {
             observation: self.view.observation.clone(),
             candidates,
             decision,
+            arrival,
         });
     }
 
@@ -227,6 +248,11 @@ impl Session {
                 if settings.port == 0
                     || settings.max_requests == 0
                     || settings.max_seconds == 0
+                    || settings.objective.chars().count() > 400
+                    || settings
+                        .objective
+                        .chars()
+                        .any(|c| c.is_control() && c != '\n')
                     || settings.bot_name.is_empty()
                     || settings.bot_name.len() > 16
                     || !settings
@@ -241,15 +267,29 @@ impl Session {
                 self.started = Instant::now();
                 self.id = session_id();
                 self.latency = LatencyPolicy::default();
+                self.next_request_at = Instant::now();
+                self.last_reflex_at = None;
                 self.view = View {
                     mode: self.settings.mode.clone(),
                     status: "Connecting".into(),
                     answer_age_limit_ms: self.latency.timing().max_answer_age_ms,
+                    objective: self.settings.objective.trim().to_owned(),
                     ..View::default()
                 };
                 self.observed_at = Instant::now();
                 self.adapter = Some(match self.settings.mode {
-                    Mode::Demo => crate::fixture::spawn(),
+                    // The distant waypoint stays the default: it lies further away than one
+                    // bounded demo goal can close, so the demo shows the honest expiry path
+                    // instead of an arrival tuned to look good. `FixtureWaypoint::Reachable`
+                    // selects the geometry in which one bounded goal arrives, which is what a
+                    // test or an operator watching the offline demo asks for explicitly.
+                    Mode::Demo => {
+                        let waypoint = match self.settings.fixture_waypoint {
+                            FixtureWaypoint::Distant => crate::fixture::DISTANT_WAYPOINT,
+                            FixtureWaypoint::Reachable => crate::fixture::REACHABLE_WAYPOINT,
+                        };
+                        crate::fixture::spawn_with_waypoint(waypoint)
+                    }
                     Mode::Live => crate::minecraft::spawn(self.settings.clone()),
                 });
                 self.event(
@@ -541,28 +581,49 @@ impl Session {
                 }
             }
         }
-        if let Some((candidate, started)) = &self.active {
-            let reached = candidate.target.as_ref().is_some_and(|target| {
-                self.view
-                    .observation
-                    .as_ref()
-                    .is_some_and(|o| distance(&o.position, target) < 0.6)
-            });
-            if reached || elapsed(*started) >= candidate.duration_ms {
+        let active_goal = self.active.as_ref().map(|(candidate, started)| {
+            (candidate.target.clone(), candidate.duration_ms, *started)
+        });
+        if let Some((target, duration_ms, started)) = active_goal {
+            let measured = self
+                .view
+                .observation
+                .as_ref()
+                .filter(|observation| observation.connected)
+                .and_then(|observation| {
+                    target
+                        .as_ref()
+                        .map(|target| distance(&observation.position, target))
+                })
+                .filter(|measured| measured.is_finite());
+            let arrived = measured.is_some_and(|measured| measured < ARRIVAL_TOLERANCE_M);
+            let elapsed_ms = elapsed(started);
+            if arrived || elapsed_ms >= duration_ms {
                 if let Some(adapter) = &self.adapter {
                     let _ = adapter.commands.send(AdapterCommand::Stop);
                 }
                 self.active = None;
                 self.view.active_goal = None;
-                self.event(
+                let message = if arrived {
+                    "Local executor: target reached"
+                } else if target.is_some() {
+                    "Local executor: goal duration expired without arrival"
+                } else {
+                    "Local executor: goal duration expired"
+                };
+                self.event_with_arrival(
                     "executor",
-                    if reached {
-                        "Local executor: target reached"
-                    } else {
-                        "Local executor: goal duration expired"
-                    },
+                    message,
                     vec![],
                     None,
+                    Some(ArrivalVerdict {
+                        target,
+                        measured_distance_m: measured,
+                        tolerance_m: ARRIVAL_TOLERANCE_M,
+                        duration_ms,
+                        elapsed_ms,
+                        arrived,
+                    }),
                 );
                 self.view.status = "Ready for the next goal".into();
             }
@@ -661,13 +722,131 @@ impl Session {
                 }
             }
         }
+        self.reflex();
         if (self.continuous || self.one_step)
             && self.pending.is_none()
             && self.active.is_none()
             && self.dispatched.is_none()
+            && !self.reflex_in_flight()
+            && Instant::now() >= self.next_request_at
         {
             self.request();
         }
+    }
+
+    /// Whether the action in flight was dispatched by the safety reflex.
+    fn reflex_in_flight(&self) -> bool {
+        self.dispatched
+            .as_ref()
+            .is_some_and(|action| action.origin.starts_with("SAFETY-REFLEX"))
+    }
+
+    /// Stops local movement and invalidates in-flight model answers without ending the
+    /// session's run mode. A pause uses `invalidate`, which also clears the run mode;
+    /// the safety reflex continues the paced loop afterwards, so it needs this narrower
+    /// stop. Preempting an idling goal means its arrival verdict is never recorded —
+    /// the same loss a manual takeover causes, and the `reflex` event names the goal it
+    /// superseded so the hole in the chain is visible in the recording.
+    fn clear_in_flight(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(pending) = self.pending.take() {
+            pending.task.abort();
+        }
+        self.active = None;
+        self.view.active_goal = None;
+        if let Some(adapter) = &self.adapter {
+            let _ = adapter.commands.send(AdapterCommand::Stop);
+        }
+    }
+
+    /// The engine's own bounded safety action, opted in per session.
+    ///
+    /// The model loop is paced and its answers arrive hundreds of milliseconds later; a
+    /// hostile mob inside arm's reach is a seconds-scale event. When a threat is that
+    /// close, the engine stops the session's in-flight work (the local stop a pause
+    /// performs, without ending the run mode), records why, and dispatches one bounded
+    /// flight goal built from the current observation. No model request is spent and the
+    /// action carries the `SAFETY-REFLEX` origin, so a recording still separates what the
+    /// model chose from what the engine did. It never preempts a navigation goal, so no
+    /// arrival verdict is lost, and it does nothing when no observed cell improves the
+    /// distance to the threat.
+    fn reflex(&mut self) {
+        if !self.settings.safety_reflex
+            || !(self.continuous || self.one_step)
+            || self.adapter.is_none()
+            || self.pending.is_some()
+            || self.dispatched.is_some()
+            || self.reflex_in_flight()
+        {
+            return;
+        }
+        if self.last_reflex_at.is_some_and(|last| {
+            last.elapsed() < Duration::from_millis(crate::survival::REFLEX_COOLDOWN_MS)
+        }) {
+            return;
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|(candidate, _)| candidate.target.is_some())
+        {
+            return;
+        }
+        if self.observed_at.elapsed() > Duration::from_secs(1) {
+            return;
+        }
+        let Some(observation) = self.view.observation.clone().filter(|o| o.connected) else {
+            return;
+        };
+        let Some(threat) =
+            crate::survival::nearest_threat_within(&observation, crate::survival::REFLEX_RADIUS_M)
+        else {
+            return;
+        };
+        let candidates = candidates(
+            &observation,
+            self.latency.timing().goal_ms,
+            &self.settings.mode,
+        );
+        // `candidates` orders flight goals best first: the observed cell that puts the
+        // most distance between the bot and the threat.
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.id.starts_with("flee_"))
+            .cloned()
+        else {
+            return;
+        };
+        let superseded = self
+            .active
+            .as_ref()
+            .map(|(candidate, _)| candidate.id.clone());
+        self.clear_in_flight();
+        self.last_reflex_at = Some(Instant::now());
+        self.view.reflexes += 1;
+        self.event(
+            "reflex",
+            format!(
+                "Engine safety action: {} is {:.1} blocks away; {} and fleeing via {}",
+                threat.kind,
+                threat.distance_m,
+                match &superseded {
+                    Some(id) =>
+                        format!("stopping in-flight work (superseded {id}, no arrival verdict)"),
+                    None => "no goal in flight".to_owned(),
+                },
+                candidate.id
+            ),
+            candidates.clone(),
+            None,
+        );
+        self.apply(
+            candidate,
+            "SAFETY-REFLEX; engine-initiated bounded action",
+            candidates,
+            None,
+            None,
+        );
     }
 
     fn request(&mut self) {
@@ -698,9 +877,36 @@ impl Session {
         };
         let timing = self.latency.timing();
         let candidates = candidates(&observation, timing.goal_ms, &self.settings.mode);
+        // Visibility for the honest case where no waypoint qualifies: the model then
+        // only sees bounded alternatives, and the reason is recorded rather than left
+        // implicit in an empty candidate list.
+        let observed_waypoints = observation
+            .blocks
+            .iter()
+            .filter(|landmark| {
+                self.settings.mode == Mode::Demo || landmark.name.starts_with("waypoint:")
+            })
+            .count();
+        let navigable = candidates
+            .iter()
+            .filter(|candidate| candidate.target.is_some())
+            .count();
+        let no_navigation = if navigable == 0 {
+            format!(
+                "; no navigate candidate: {observed_waypoints} observed waypoints, none between {} and 12 blocks away",
+                ARRIVAL_TOLERANCE_M
+            )
+        } else {
+            String::new()
+        };
         let (tx, receiver) = mpsc::unbounded_channel();
         let request_observation = observation.clone();
         let request_candidates = candidates.clone();
+        let objective = self.settings.objective.trim().to_owned();
+        // The paced loop may not ask again before this instant, so a long session
+        // bounds provider spend by wall-clock rather than by action count alone.
+        self.next_request_at =
+            Instant::now() + Duration::from_millis(self.settings.request_interval_ms);
         let started = Instant::now();
         let task = tokio::spawn(async move {
             let result = if let Some(key) = key {
@@ -708,6 +914,7 @@ impl Session {
                     &key,
                     &request_observation,
                     &request_candidates,
+                    &objective,
                     Duration::from_secs(10),
                 )
                 .await
@@ -741,14 +948,15 @@ impl Session {
         self.event(
             "request",
             format!(
-                "{} {} for observation {}",
+                "{} {} for observation {}{}",
                 if self.settings.mode == Mode::Demo {
                     "Synthetic fixture decision (no API call)"
                 } else {
                     "TypeSafe request"
                 },
                 self.view.requests,
-                observation.sequence
+                observation.sequence,
+                no_navigation
             ),
             candidates,
             None,
@@ -828,19 +1036,23 @@ fn candidates(observation: &Observation, duration_ms: u64, mode: &Mode) -> Vec<C
                 && p.y.is_finite()
                 && p.z.is_finite()
                 && distance(&observation.position, p) <= 12.0
-                && distance(&observation.position, p) > 0.6
+                && distance(&observation.position, p) > ARRIVAL_TOLERANCE_M
         })
         .take(8)
-        .map(|(index, landmark)| Candidate {
-            id: format!("waypoint_{index}"),
-            description: format!(
-                "Navigate toward observed location: {}; pathfinder must not mine",
-                landmark.name
-            ),
-            target: Some(landmark.position.clone()),
-            duration_ms: duration_ms.clamp(1, 10_000),
+        .map(|(index, landmark)| {
+            let measured = distance(&observation.position, &landmark.position);
+            Candidate {
+                id: format!("waypoint_{index}"),
+                description: format!(
+                    "Navigate toward observed location: {} ({measured:.1} blocks away); pathfinder must not mine",
+                    landmark.name
+                ),
+                target: Some(landmark.position.clone()),
+                duration_ms: duration_ms.clamp(1, 10_000),
+            }
         })
         .collect();
+    result.extend(crate::survival::flee_candidates(observation, duration_ms));
     result.push(Candidate {
         id: "wait".into(),
         description: "Wait without moving".into(),
@@ -1424,6 +1636,7 @@ mod tests {
                 observation: Some(observation()),
                 candidates: vec![],
                 decision: None,
+                arrival: None,
             }],
         };
         std::fs::write(&path, serde_json::to_vec(&recording).unwrap()).unwrap();
@@ -1452,5 +1665,209 @@ mod tests {
             events: session.view.events,
         })
         .unwrap();
+    }
+
+    /// The offline observation plus a hostile neighbour and two observed standable
+    /// cells: the cell away from the threat and one between bot and threat.
+    fn threat_observation() -> Observation {
+        let mut observation = observation();
+        observation.blocks = vec![
+            Landmark {
+                name: "waypoint:-2:64:0".into(),
+                position: Position {
+                    x: -2.5,
+                    y: 64.0,
+                    z: 0.5,
+                },
+            },
+            Landmark {
+                name: "waypoint:2:64:0".into(),
+                position: Position {
+                    x: 2.5,
+                    y: 64.0,
+                    z: 0.5,
+                },
+            },
+        ];
+        observation.entities = vec![Landmark {
+            name: "Zombie".into(),
+            position: Position {
+                x: 3.0,
+                y: 64.0,
+                z: 0.0,
+            },
+        }];
+        observation
+    }
+
+    fn connected_session(
+        settings: Settings,
+        published: Observation,
+    ) -> (Session, mpsc::UnboundedReceiver<AdapterCommand>) {
+        let mut session = session();
+        session.settings = settings;
+        session.view.observation = Some(published.clone());
+        session.observed_at = Instant::now();
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let (_observations_tx, observations) = tokio::sync::watch::channel(Some(published));
+        let (_errors_tx, errors) = tokio::sync::watch::channel(None);
+        session.adapter = Some(AdapterHandle {
+            commands,
+            observations,
+            errors,
+            task: tokio::spawn(std::future::pending()),
+        });
+        (session, receiver)
+    }
+
+    #[test]
+    fn hostile_entity_adds_one_flight_candidate_away_from_the_threat() {
+        let observation = threat_observation();
+        let candidates = candidates(&observation, 2_000, &Mode::Live);
+        let flight: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.id.starts_with("flee_"))
+            .collect();
+        assert_eq!(
+            flight.len(),
+            1,
+            "only the observed cell that increases the distance is a flight goal"
+        );
+        assert_eq!(flight[0].id, "flee_0");
+        assert_eq!(flight[0].duration_ms, 2_000);
+        assert!(flight[0].description.contains("Zombie"));
+        assert_eq!(candidates.last().unwrap().id, "wait");
+    }
+
+    #[test]
+    fn passive_neighbours_never_become_flight_goals() {
+        let mut observation = threat_observation();
+        observation.entities = vec![Landmark {
+            name: "Cow".into(),
+            position: Position {
+                x: 3.0,
+                y: 64.0,
+                z: 0.0,
+            },
+        }];
+        assert!(
+            !candidates(&observation, 2_000, &Mode::Live)
+                .iter()
+                .any(|candidate| candidate.id.starts_with("flee_"))
+        );
+    }
+
+    #[tokio::test]
+    async fn safety_reflex_dispatches_a_flight_goal_without_a_model_request() {
+        let (mut session, mut commands) = connected_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            threat_observation(),
+        );
+        session.continuous = true;
+
+        session.tick();
+
+        assert_eq!(session.view.requests, 0, "a reflex spends no model request");
+        assert_eq!(session.view.reflexes, 1);
+        let reflex = session
+            .view
+            .events
+            .iter()
+            .find(|event| event.kind == "reflex")
+            .expect("the reflex records why it acted");
+        assert!(reflex.message.contains("Zombie") && reflex.message.contains("3.0 blocks"));
+        assert!(reflex.message.contains("no goal in flight"));
+        assert!(reflex.candidates.iter().any(|c| c.id == "flee_0"));
+        let dispatched = session.dispatched.as_ref().expect("reflex dispatched");
+        assert!(dispatched.origin.starts_with("SAFETY-REFLEX"));
+        assert_eq!(dispatched.candidate.id, "flee_0");
+        assert!(
+            matches!(commands.try_recv(), Ok(AdapterCommand::Stop)),
+            "the reflex stops local movement first"
+        );
+        assert!(
+            matches!(commands.try_recv(), Ok(AdapterCommand::Execute(_))),
+            "then dispatches the flight goal"
+        );
+    }
+
+    #[tokio::test]
+    async fn safety_reflex_never_preempts_a_navigation_goal() {
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Live,
+                safety_reflex: true,
+                ..Settings::default()
+            },
+            threat_observation(),
+        );
+        session.continuous = true;
+        let navigation = candidates(&threat_observation(), 2_000, &Mode::Live)
+            .into_iter()
+            .find(|candidate| candidate.target.is_some())
+            .unwrap();
+        session.active = Some((navigation.clone(), Instant::now()));
+
+        session.tick();
+
+        assert_eq!(session.view.reflexes, 0);
+        assert!(session.dispatched.is_none());
+        assert_eq!(
+            session
+                .active
+                .as_ref()
+                .map(|(candidate, _)| candidate.id.as_str()),
+            Some(navigation.id.as_str()),
+            "the goal in flight keeps its arrival verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn safety_reflex_stays_off_until_it_is_opted_in() {
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Demo,
+                ..Settings::default()
+            },
+            threat_observation(),
+        );
+        session.continuous = true;
+
+        session.tick();
+
+        assert_eq!(session.view.reflexes, 0);
+        assert!(session.dispatched.is_none());
+        assert_eq!(session.view.requests, 1, "the model loop still asks");
+    }
+
+    #[tokio::test]
+    async fn request_interval_paces_the_continuous_loop() {
+        let (mut session, _commands) = connected_session(
+            Settings {
+                mode: Mode::Demo,
+                request_interval_ms: 60_000,
+                ..Settings::default()
+            },
+            threat_observation(),
+        );
+        session.continuous = true;
+
+        session.tick();
+        assert_eq!(session.view.requests, 1, "Start asks immediately");
+        // The answer for the first request has been consumed, so only the pacing gate
+        // can hold the next one back.
+        session.pending = None;
+        session.tick();
+        assert_eq!(
+            session.view.requests, 1,
+            "the paced loop waits out the interval"
+        );
+        session.next_request_at = Instant::now() - Duration::from_millis(1);
+        session.tick();
+        assert_eq!(session.view.requests, 2);
     }
 }

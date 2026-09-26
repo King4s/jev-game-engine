@@ -1,0 +1,36 @@
+{
+  "goal": "Finish the survival-session work already in the working tree so an operator can run the bot through a whole Minecraft night unattended and read afterwards, from the recording alone, what the model chose, what the engine's safety reflex did and whether the bot moved. The tree already has: Settings::objective, Settings::request_interval_ms and Settings::safety_reflex; src/survival.rs (hostile filter, flee_* candidates, reflex constants); the engine reflex; CLI flags --objective, --request-interval-seconds, --safety-reflex, --max-requests, --max-seconds; and docs sections in README.md, docs/architecture.md and tasks/verification.md. What is missing is a headless way to run a multi-goal session with those settings, offline coverage for it, and a recording report that separates reflex actions from model answers. Keep the project's rule: only the model, the operator or the opt-in reflex chooses a goal; the engine never derives an action from the objective text; safety and stopping never wait for a model request; live evidence is never claimed from offline tests. Respond and document in English.",
+  "acceptance": [
+    "origin::event_origin labels the `reflex` event and a reflex action's `dispatched` and `action` rows ActionOrigin::SafetyReflex with the exact label SAFETY-REFLEX, distinct from JEV-SELECTED, FIXTURE and MANUAL; the desktop timeline and `recording-report` show that label through the same helper, and `recording-report` reports the count of reflex actions separately from model answers (both in its text output and in `--json`).",
+    "A headless session harness exists as a Cargo binary (extend src/bin/navigation-demo.rs or add src/bin/session-run.rs) that runs a continuous multi-goal session through the real EngineHandle with --objective, --safety-reflex, --request-interval-seconds, --max-requests and --max-seconds, exports the recording to a path given by --export, prints a JSON summary (requests, answers by candidate kind: wait / waypoint / flee, reflex actions, arrived verdicts, straight-line displacement, final health, connected at end) and exits 0 only when the session ended by its own budget while still connected; non-zero distinct codes for connection failure, provider failure and an unexpected disconnect.",
+    "The harness has a --fixture mode that runs the identical loop against the offline fixture (Mode::Fixture, no provider or Minecraft calls), and an integration test under tests/ runs it (or its library entry point) in fixture mode with --safety-reflex and an objective and asserts the exported recording loads through recording::load, contains a request with the objective in its state or message, and that the summary counts match the recording. The test must not need a network connection or an API key.",
+    "Invalid input fails visibly: an objective longer than 400 characters or containing control characters, a request interval outside 0..=86400 s, --max-requests or --max-seconds outside their bounds, an unwritable --export path, and a missing API key in live mode each exit non-zero with a one-line message; at least the objective and interval bounds are covered by tests.",
+    "README.md documents the night-run command with every flag and states that the objective, pacing, flee candidates and reflex have offline evidence only until a live recording exists; tasks/verification.md keeps the same statement; no document claims live survival evidence.",
+    "cargo test, cargo check and cargo clippy --all-targets -- -D warnings pass, and the tests above exist and cover every criterion without a network connection."
+  ],
+  "workdir": ".",
+  "checks": [
+    "cargo test",
+    "cargo check",
+    "cargo clippy --all-targets -- -D warnings"
+  ],
+  "jev_model": "jev-latest",
+  "jev_done_threshold": 0.8,
+  "max_turns": 12,
+  "max_consecutive_failures": 4,
+  "check_timeout": 900,
+  "roles": {
+    "build": {
+      "when": "Implementation or documentation is missing or incomplete relative to an acceptance criterion",
+      "brief": "Implement one coherent slice for one acceptance criterion in the existing Rust style (edition 2024, doc comments that say what a thing proves and does not prove). Reuse EngineHandle, recording::load and origin::event_origin; do not add dependencies. Write implementation and documentation but no tests. Never claim live evidence for anything not measured live. Do not run the configured checks; the loop server runs them."
+    },
+    "test": {
+      "when": "An acceptance criterion has no offline test, or the harness's fixture mode is untested",
+      "brief": "Write or extend integration tests under tests/ or unit tests beside the code that verify the acceptance criteria offline (fixture mode, no network, no API key). Do not change implementation code. Do not run the configured checks; the loop server runs them."
+    },
+    "fix": {
+      "when": "Checks fail with a concrete error, or the reviewer lists a concrete gap",
+      "brief": "Read the failing check output or the reviewer's missing list and fix the root cause with the smallest correct change, keeping cargo fmt formatting. Do not run the configured checks; the loop server runs them."
+    }
+  }
+}
