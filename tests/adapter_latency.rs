@@ -3,6 +3,7 @@ use jev_game_engine::{
     fixture,
     latency::{LatencyPolicy, answer_is_current},
     model::{Candidate, Observation, Position},
+    refusal::Refusal,
 };
 use std::time::Duration;
 
@@ -82,6 +83,7 @@ fn new_samples_do_not_extend_a_previously_issued_request() {
 
 fn movement(target: Position, duration_ms: u64) -> Candidate {
     Candidate {
+        skill: None,
         id: "navigate".into(),
         description: "Test navigation".into(),
         target: Some(target),
@@ -343,6 +345,7 @@ async fn unsupported_targetless_command_rejects_and_cancels_existing_movement() 
         execute(
             &adapter,
             Candidate {
+                skill: None,
                 id: "teleport".into(),
                 description: "Unsupported targetless action".into(),
                 target: None,
@@ -380,11 +383,11 @@ async fn execute(
     adapter: &AdapterHandle,
     candidate: Candidate,
     observation: &Observation,
-) -> Result<std::time::Instant, &'static str> {
+) -> Result<std::time::Instant, Refusal> {
     let (request, acknowledgement) = ActionRequest::new(candidate, observation);
     adapter
         .commands
-        .send(AdapterCommand::Execute(request))
+        .send(AdapterCommand::Execute(Box::new(request)))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), acknowledgement)
         .await
@@ -440,7 +443,7 @@ async fn mismatched_world_identity_rejects_with_ack_and_cancels_active_motion() 
             }
             adapter
                 .commands
-                .send(AdapterCommand::Execute(request))
+                .send(AdapterCommand::Execute(Box::new(request)))
                 .unwrap();
             let result = tokio::time::timeout(Duration::from_secs(2), reply)
                 .await
@@ -481,7 +484,7 @@ async fn dropped_ack_receiver_prevents_execution_and_cancels_active_motion() {
         drop(reply);
         adapter
             .commands
-            .send(AdapterCommand::Execute(request))
+            .send(AdapterCommand::Execute(Box::new(request)))
             .unwrap();
         assert_rejection_stops_motion(&mut adapter).await;
         if !already_moving {
@@ -520,9 +523,9 @@ async fn expired_acceptance_never_executes_and_stops_prior_motion() {
             };
             adapter
                 .commands
-                .send(AdapterCommand::Execute(
+                .send(AdapterCommand::Execute(Box::new(
                     request.with_deadline(accepted_before),
-                ))
+                )))
                 .unwrap();
             if expires_while_queued {
                 // This current-thread test does not yield: the command expires in

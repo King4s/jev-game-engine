@@ -5,6 +5,7 @@ fn candidates() -> Vec<Candidate> {
     ["wait", "waypoint_1"]
         .into_iter()
         .map(|id| Candidate {
+            skill: None,
             id: id.into(),
             description: id.into(),
             target: None,
@@ -206,6 +207,7 @@ fn invalid_candidate_sets_cannot_define_an_action_space() {
     assert!(validate_response(response(), &blank, 1).is_err());
     let too_many: Vec<_> = (0..256)
         .map(|i| Candidate {
+            skill: None,
             id: format!("option_{i}"),
             description: String::new(),
             target: None,
@@ -247,6 +249,7 @@ fn a_distribution_that_does_not_sum_to_one_names_the_computed_sum() {
 fn candidates_named(ids: &[&str]) -> Vec<Candidate> {
     ids.iter()
         .map(|id| Candidate {
+            skill: None,
             id: (*id).into(),
             description: (*id).into(),
             target: None,

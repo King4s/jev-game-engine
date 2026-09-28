@@ -152,6 +152,7 @@ async fn probe(
     let local_move = args.iter().any(|s| s == "--local-move");
     if args.iter().any(|s| s == "--jev") || local_move {
         let mut candidates = vec![Candidate {
+            skill: None,
             id: "wait".into(),
             description: "Wait without moving".into(),
             target: None,
@@ -176,6 +177,7 @@ async fn probe(
             && let Some(landmark) = waypoint
         {
             candidates.push(Candidate {
+                skill: None,
                 id: "navigate".into(),
                 description: "Navigate to the verified nearby waypoint without mining".into(),
                 target: Some(landmark.position.clone()),
@@ -223,7 +225,9 @@ async fn probe(
         let before = current_observation(adapter)?;
         print_position("Before action", &before);
         let (request, acknowledged) = ActionRequest::new(selected, &observation);
-        adapter.commands.send(AdapterCommand::Execute(request))?;
+        adapter
+            .commands
+            .send(AdapterCommand::Execute(Box::new(request)))?;
         tokio::time::timeout(Duration::from_secs(3), acknowledged)
             .await
             .context("Adapter action acknowledgement timed out")?

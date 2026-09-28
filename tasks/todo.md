@@ -8,6 +8,8 @@ Report fixtures, real game connections and real Jev inference separately. Missin
 
 ## Task 1: Define the Rust contract for goals and local execution
 
+**Standing requirement for all Minecraft tasks:** apply the [gameplay planning contract](minecraft-gameplay-contract.md), including dependencies, safe access/return, resource collection, interruption/recovery and independently verifiable outcomes. The Level 1 scenarios there remain pending; neither this checklist nor passing primitive tests establishes gameplay completion.
+
 **Description:** Turn research and the approved macro architecture into concrete contracts and version choices.
 **Acceptance:**
 
@@ -86,7 +88,7 @@ Report fixtures, real game connections and real Jev inference separately. Missin
 - [ ] Show confidence/probabilities/usage only when returned; invent no explanations.
 - [ ] Invalid responses and missing keys produce concrete errors without hidden test fallback.
 
-**Verification:** Provider contract tests and one budget-limited real Jev call when credentials are available.
+**Verification:** Provider contract tests and one budget-limited real Jev call when credentials are available. Status 2026-09-27: that live call is recorded from the test-server run in `runs/level1-resume/live-turn23.json` — two `model_stage` requests for `jev-latest` (4,935 input and 107 output tokens, 299ms), one blocked, and a `model_route` row whose handler choice was `astra` at confidence 0.02 with reason "Jev handler judgment is uncertain", so no action was executed. The escalation call to `typesafe/jev-router` remains unverified, no complete autonomous Minecraft Level 1 wood sequence has been proven, and offline checks or accepted actions are not gameplay proof.
 **Dependencies:** 5. **Size:** M.
 **Files:** `src/providers/jev.rs`, `tests/jev_contract.rs`, selected decision view, `src/main.rs`.
 

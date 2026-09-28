@@ -4,6 +4,8 @@ Date: September 25, 2026. Current user requirements supersede the earlier TypeSc
 
 ## Purpose
 
+For all Minecraft gameplay work, apply the [Minecraft gameplay planning contract](minecraft-gameplay-contract.md) to every goal and subtask. Its scenario requirements supplement this original engine plan and the Survival ladder; they must be derived proactively before implementation.
+
 A local AI game engine lets Jev select actions while the UI displays observations, candidates, model responses, executed actions and observed outcomes. The first Minecraft scenario is bounded navigation in a separate local test world. One active session is sufficient initially.
 
 The development Jev loop selects implementation work; in-game Jev selects gameplay actions. Keep their documentation, logs and budgets separate. See [research.md](research.md), [game-library.md](game-library.md) and [todo.md](todo.md). Older research supplies context, not the current language choice.

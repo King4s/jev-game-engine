@@ -31,6 +31,7 @@ use crate::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PRESTART_MAX_OBSERVATION_AGE: Duration = Duration::from_millis(500);
 /// Longest an objective may be, matching the engine's own connection validation.
 pub const MAX_OBJECTIVE_CHARS: usize = 400;
 /// Upper bound on the pacing interval, in seconds (one day).
@@ -38,6 +39,8 @@ pub const MAX_REQUEST_INTERVAL_S: u64 = 86_400;
 pub const MAX_REQUESTS: u64 = 100_000;
 /// Upper bound on the session time budget, in seconds (seven days).
 pub const MAX_SESSION_SECONDS: u64 = 604_800;
+/// The setup window is intentionally short and cannot outlive the session budget.
+pub const MAX_PRESTART_SECONDS: u64 = 300;
 
 /// Everything a session run needs; validated by [`SessionOptions::validate`].
 #[derive(Clone, Debug)]
@@ -45,6 +48,8 @@ pub struct SessionOptions {
     pub settings: Settings,
     /// Budget for the first connected observation.
     pub connect_timeout: Duration,
+    /// Optional live wood setup window after Connect and before the first Start.
+    pub prestart_timeout: Duration,
     /// Where to move the exported recording; `None` leaves it under `runs/`.
     pub export: Option<PathBuf>,
     /// Leave the bot connected at the end instead of stopping and resetting.
@@ -72,8 +77,21 @@ impl SessionOptions {
             "--max-seconds must be from 1 to {MAX_SESSION_SECONDS}"
         );
         ensure!(
+            (0.0..=1.0).contains(&self.settings.route_min_confidence),
+            "--route-min-confidence must be from 0 to 1"
+        );
+        ensure!(
             !self.connect_timeout.is_zero(),
             "the connect budget must be positive"
+        );
+        ensure!(
+            self.prestart_timeout <= Duration::from_secs(MAX_PRESTART_SECONDS),
+            "--prestart-seconds must be from 0 to {MAX_PRESTART_SECONDS}"
+        );
+        ensure!(
+            self.prestart_timeout.is_zero()
+                || (self.settings.mode == Mode::Live && self.settings.wood_skills),
+            "--prestart-seconds requires a live wood-skills session"
         );
         if let Some(path) = &self.export {
             validate_export_path(path)?;
@@ -115,6 +133,20 @@ pub fn validate_export_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A live session that can break blocks and place a table must not run with the safety
+/// reflex off silently: the last autonomous Survival attempts had it off by accident
+/// (see runs/level1-resume/HANDOFF-2026-09-27.md) while mobs were spawning. The reflex
+/// stays opt-in and no default changes; this only makes the state impossible to miss.
+pub fn safety_reflex_warning(
+    mode: &Mode,
+    wood_skills: bool,
+    safety_reflex: bool,
+) -> Option<&'static str> {
+    (*mode == Mode::Live && wood_skills && !safety_reflex).then_some(
+        "WARNING: live wood skills are enabled without --safety-reflex, so this session can break blocks and place a table while hostile mobs are not avoided. Add --safety-reflex, or verify the world cannot hurt the bot before starting.",
+    )
+}
+
 /// How the session ended. Only `Budget` with the bot still connected is a success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,6 +156,8 @@ pub enum EndReason {
     /// No connected observation arrived inside the connect budget, or the adapter failed
     /// before the loop started.
     ConnectionFailed,
+    /// Setup never reached the permitted world with an empty known inventory.
+    PrerequisiteFailed,
     /// The provider (TypeSafe) failed or a key was missing.
     ProviderFailed,
     /// The bot lost its connection while the session was running.
@@ -141,6 +175,7 @@ impl EndReason {
         match self {
             Self::Budget => 0,
             Self::ConnectionFailed => 1,
+            Self::PrerequisiteFailed => 10,
             Self::ProviderFailed => 6,
             Self::Disconnected => 7,
             Self::Stalled => 8,
@@ -170,6 +205,11 @@ pub struct Counts {
     pub hits: u32,
     /// Model answers that failed validation and were dropped without acting.
     pub rejected_answers: u32,
+    /// Chosen actions the local guard refused: recorded as `rejected` with the candidate it
+    /// refused and the concrete check that refused it, and never executed. A refusal does not
+    /// end the run — a session that keeps being refused ends on its budget — so this is how a
+    /// recording reports how much of what the model chose the engine could not carry out.
+    pub refused_actions: u32,
 }
 
 /// Summary of one run: the counts, the movement and the end state.
@@ -179,6 +219,8 @@ pub struct SessionSummary {
     pub objective: String,
     pub safety_reflex: bool,
     pub request_interval_ms: u64,
+    /// The handler-confidence floor this run accepted, so a run states the policy it used.
+    pub route_min_confidence: f64,
     pub max_requests: u32,
     pub max_seconds: u64,
     pub end_reason: EndReason,
@@ -190,23 +232,51 @@ pub struct SessionSummary {
     pub connected_at_end: bool,
     pub p50_ms: Option<u64>,
     pub p95_ms: Option<u64>,
+    /// Measured world-peer p95 and the budget derived from it, so a run states its own
+    /// timing instead of assuming one user's connection.
+    pub client_p95_ms: Option<u64>,
+    pub client_action_budget_ms: u64,
+    /// Budget the run judged observation freshness with, measured from the interval the
+    /// adapter published at.
+    pub observation_budget_ms: u64,
     pub recording_path: Option<String>,
+    /// The concrete check the local guard named for the last chosen action it refused, or
+    /// `None` when every chosen action was executed. A refusal never ends the run, so this is
+    /// where a summary says why work the model asked for did not happen; `counts.refused_actions`
+    /// says how often it happened.
+    pub last_refusal: Option<String>,
 }
 
 /// Derives the counts from recorded events. Shared by the live summary and the offline
 /// test so the two cannot disagree about what the recording says.
 pub fn counts(events: &[Event]) -> Counts {
+    counts_with_session(events, None)
+}
+
+/// Derives counts for a known session, ignoring late provider telemetry from
+/// another session while retaining the request-event fallback for old recordings.
+pub fn counts_for_session(events: &[Event], session_id: &str) -> Counts {
+    counts_with_session(events, Some(session_id))
+}
+
+fn counts_with_session(events: &[Event], session_id: Option<&str>) -> Counts {
     let mut counts = Counts {
         events: events.len(),
+        requests: crate::recording::request_count_events(events, session_id),
         ..Counts::default()
     };
     for event in events {
         match event.kind.as_str() {
-            "request" => counts.requests += 1,
             "action" => counts.accepted_actions += 1,
             "hurt" => counts.hits += 1,
-            "rejected" if event.message.starts_with(crate::provider::REJECTED_ANSWER) => {
+            "rejected" if crate::provider::is_rejected_answer(&event.message) => {
                 counts.rejected_answers += 1;
+            }
+            "rejected" if !event.candidates.is_empty() => {
+                // A refused action carries the candidate it refused; a dropped answer carries
+                // none. The refusal names its own check in the message, so this count and the
+                // recording's own sentence classify it together.
+                counts.refused_actions += 1;
             }
             "decision" => {
                 if let Some(decision) = &event.decision {
@@ -261,6 +331,7 @@ pub fn run_session(options: &SessionOptions) -> Result<SessionSummary> {
     options.validate()?;
     let settings = &options.settings;
     let engine = EngineHandle::new();
+    let connected_at = Instant::now();
     engine.send(Command::Connect(settings.clone()));
 
     let mut printed = 0usize;
@@ -271,10 +342,19 @@ pub fn run_session(options: &SessionOptions) -> Result<SessionSummary> {
         &mut printed,
     );
     let (end_reason, end_detail) = match connected {
-        Ok(_) => {
-            engine.send(Command::Start);
-            wait_for_end(&engine, settings, options.verbose, &mut printed)
-        }
+        Ok(initial) => match wait_for_prestart(
+            &engine,
+            options,
+            connected_at,
+            initial.sequence,
+            &mut printed,
+        ) {
+            Ok(()) => {
+                engine.send(Command::Start);
+                wait_for_end(&engine, settings, options.verbose, &mut printed)
+            }
+            Err(failure) => failure,
+        },
         Err(detail) => (EndReason::ConnectionFailed, detail),
     };
 
@@ -301,6 +381,158 @@ pub fn run_session(options: &SessionOptions) -> Result<SessionSummary> {
     ))
 }
 
+/// Returns the unmet live wood prerequisite from the latest observation. The complete
+/// idle player inventory mirror is packet-confirmed by the live adapter; projected
+/// inventory fields alone cannot establish that all slots are empty.
+pub fn prestart_issue(
+    observation: &Observation,
+    allowed_dimension: &str,
+    initial_sequence: u64,
+    last_update_age: Option<Duration>,
+) -> Option<String> {
+    if !observation.connected {
+        return Some("bot is disconnected".into());
+    }
+    if observation.sequence <= initial_sequence
+        || !last_update_age.is_some_and(|age| age <= PRESTART_MAX_OBSERVATION_AGE)
+    {
+        return Some("waiting for a fresh observation".into());
+    }
+    if observation.dimension.as_deref() != Some(allowed_dimension) {
+        return Some(format!(
+            "dimension {:?}; required {allowed_dimension}",
+            observation.dimension
+        ));
+    }
+    let Some(slots) = observation.crafting_inventory.as_ref() else {
+        return Some("inventory unavailable".into());
+    };
+    if slots.len() != 36
+        || slots
+            .iter()
+            .enumerate()
+            .any(|(i, slot)| slot.slot != (i + 9) as u16)
+    {
+        return Some("inventory unavailable".into());
+    }
+    if !observation.inventory.is_empty()
+        || observation.items.values().any(|count| *count > 0)
+        || observation.held_item.is_some()
+        || slots.iter().any(|slot| slot.count > 0)
+    {
+        return Some("inventory is not empty".into());
+    }
+    None
+}
+
+/// Wall-clock age is based on a sequence advance observed during the setup wait.
+/// Seeing the same snapshot repeatedly never refreshes its timestamp.
+struct PrestartFreshness {
+    sequence: u64,
+    changed_at: Option<Instant>,
+}
+
+impl PrestartFreshness {
+    fn new(initial_sequence: u64) -> Self {
+        Self {
+            sequence: initial_sequence,
+            changed_at: None,
+        }
+    }
+
+    fn observe(&mut self, sequence: u64, now: Instant) -> Option<Duration> {
+        if sequence > self.sequence {
+            self.changed_at = Some(now);
+        } else if sequence < self.sequence {
+            self.changed_at = None;
+        }
+        self.sequence = sequence;
+        self.changed_at
+            .map(|changed_at| now.duration_since(changed_at))
+    }
+}
+
+#[cfg(test)]
+mod prestart_freshness_tests {
+    use super::*;
+
+    #[test]
+    fn initial_and_stalled_sequences_do_not_gain_a_new_timestamp() {
+        let start = Instant::now();
+        let mut freshness = PrestartFreshness::new(4);
+        assert_eq!(freshness.observe(4, start), None);
+        assert_eq!(
+            freshness.observe(5, start + Duration::from_millis(10)),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            freshness.observe(5, start + Duration::from_millis(511)),
+            Some(Duration::from_millis(501))
+        );
+        assert_eq!(
+            freshness.observe(6, start + Duration::from_millis(512)),
+            Some(Duration::ZERO)
+        );
+    }
+}
+
+fn wait_for_prestart(
+    engine: &EngineHandle,
+    options: &SessionOptions,
+    connected_at: Instant,
+    initial_sequence: u64,
+    printed: &mut usize,
+) -> std::result::Result<(), (EndReason, String)> {
+    if options.prestart_timeout.is_zero() {
+        return Ok(());
+    }
+    let deadline = (Instant::now() + options.prestart_timeout)
+        .min(connected_at + Duration::from_secs(options.settings.max_seconds));
+    let mut freshness = PrestartFreshness::new(initial_sequence);
+    loop {
+        let view = engine.snapshot();
+        if options.verbose {
+            print_new_events(&view, printed);
+        }
+        let observation = view.observation.as_ref();
+        if let Some(error) = &view.last_error {
+            let connected = observation.is_some_and(|observation| observation.connected);
+            let health = observation.map(|observation| observation.health);
+            if let ErrorOutcome::End(reason) = classify_error(error, connected, health) {
+                return Err((reason, format!("pre-Start error: {error}")));
+            }
+        }
+        if !observation.is_some_and(|observation| observation.connected) {
+            return Err((
+                EndReason::Disconnected,
+                "bot disconnected before Start".into(),
+            ));
+        }
+        let observation = observation.expect("connected observation");
+        let now = Instant::now();
+        let last_update_age = freshness.observe(observation.sequence, now);
+        let issue = prestart_issue(
+            observation,
+            &options.settings.allowed_dimension,
+            initial_sequence,
+            last_update_age,
+        );
+        if now >= deadline {
+            return Err((
+                EndReason::PrerequisiteFailed,
+                format!(
+                    "pre-Start prerequisite timed out: {}",
+                    issue.unwrap_or_else(|| "session time budget expired before Start".into())
+                ),
+            ));
+        }
+        if issue.is_none() {
+            return Ok(());
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 fn summarise(
     settings: &Settings,
     view: &View,
@@ -319,11 +551,15 @@ fn summarise(
         objective: settings.objective.trim().to_owned(),
         safety_reflex: settings.safety_reflex,
         request_interval_ms: settings.request_interval_ms,
+        route_min_confidence: settings.route_min_confidence,
         max_requests: settings.max_requests,
         max_seconds: settings.max_seconds,
         end_reason,
         end_detail,
-        counts: counts(&view.events),
+        counts: view.session_id.as_deref().map_or_else(
+            || counts(&view.events),
+            |id| counts_for_session(&view.events, id),
+        ),
         displacement_m: displacement(&view.events),
         final_health: last_observation.map(|observation| f64::from(observation.health)),
         connected_at_end: view
@@ -332,7 +568,11 @@ fn summarise(
             .is_some_and(|observation| observation.connected),
         p50_ms: view.p50_ms,
         p95_ms: view.p95_ms,
+        client_p95_ms: view.client_p95_ms,
+        client_action_budget_ms: view.client_action_budget_ms,
+        observation_budget_ms: view.observation_budget_ms,
         recording_path,
+        last_refusal: view.last_refusal.clone(),
     }
 }
 
@@ -383,7 +623,9 @@ fn wait_for_observation(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorOutcome {
     /// A world or dimension change, or damage the bot survived, while still connected: the
-    /// engine stopped locally and the harness resumes, as an operator would.
+    /// engine stopped locally and resumes by itself once the adapter publishes the new world.
+    /// The harness sends `Start` as an operator would, which cancels whatever is in flight and
+    /// re-arms the loop.
     Resume,
     /// The session is over for this reason.
     End(EndReason),

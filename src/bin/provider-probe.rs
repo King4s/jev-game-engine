@@ -34,12 +34,14 @@ async fn main() -> Result<()> {
     };
     let candidates = vec![
         Candidate {
+            skill: None,
             id: "stop".into(),
             description: "Stop because no game is connected".into(),
             target: None,
             duration_ms: 1_000,
         },
         Candidate {
+            skill: None,
             id: "wait".into(),
             description: "Wait without movement for a connection".into(),
             target: None,

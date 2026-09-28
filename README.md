@@ -71,6 +71,8 @@ cargo run --bin session-run -- --port <TUNNEL_PORT> --bot <BOT_NAME> --legacy-fo
 
 `--fixture` (optionally with `--fixture-reachable-waypoint`) runs the identical loop against the offline fixture with no key and no server; `--keep-connected` leaves the bot in the world afterwards; `--quiet` prints only the summary. Exit 0 means the engine ended the session on its own budget with the bot still connected; 1 is a connection failure, 2 invalid arguments or a missing key, 6 a provider failure, 7 a disconnect during the session, 8 a session that neither ended nor failed inside the wall-clock guard, and 9 the bot died. The summary counts requests, answers by kind (`wait`, `waypoint`, `flee`), engine safety-reflex actions, arrival verdicts, straight-line displacement, final health and whether the bot was connected at the end, all derived from the exported recording's events, so `recording-report` on that file agrees with it.
 
+For a live wood session, `--prestart-seconds 120` waits on the same bot connection for an observation in `--allowed-dimension` with a packet-confirmed, idle and grounded player inventory mirror. All 36 storage and hotbar slots, the projected item totals and inventory, and the held item must be empty. The observation sequence must advance after the initial connected snapshot and have advanced within the last 500 ms immediately before Start; a stalled snapshot cannot pass the gate. An operator may use RCON to teleport the bot and clear its inventory during this setup window; the model and reflex do not run until Start. The window is capped at 300 seconds and by `--max-seconds` from Connect. A timeout exports the recording and exits 10 with the unmet prerequisite. The default is zero, preserving immediate Start. This flag requires live mode and `--wood-skills`.
+
 None of this has live evidence yet. The objective, the pacing gate, the flight candidates, the reflex and the night-run harness are covered by offline tests only, until a live recording exists; see [verification](tasks/verification.md#session-objective-and-safety-reflex-added-2026-09-26-offline-evidence-only).
 
 ### TypeSafe key
@@ -83,6 +85,8 @@ cargo run -- --live-preview --port 25565 --bot JevBot
 ```
 
 The file contains the API key. `TYPESAFE_API_KEY` is also supported and takes precedence. Do not commit keys or include them in shared artifacts. Live agent requests count toward configured request/time budgets. Missing keys, rejected responses and failed connections produce visible errors, without hidden fixture fallback. See the [TypeSafe HTTP API](https://docs.typesafe.ai/api).
+
+Live decisions use Jev-first typed routing: Jev can choose directly from the bounded catalogue or escalate to `typesafe/jev-router` through OpenRouter Chat Completions. Escalation requires `OPENROUTER_API_KEY` as well as the TypeSafe credential. A decision uses at most one TypeSafe call and one OpenRouter call. The application blocks missing or sub-0.5 handler confidence and applies observation freshness checks before dispatch. See [model routing](docs/model-routing.md) for budgets, audit fields and failure behavior. Historical Astra recordings remain readable; Astra is not in the current live route, and no live Jev Router call is claimed.
 
 ### What the bot observes
 
@@ -129,7 +133,7 @@ Stopping never depends on another model request. Event JSON keeps `"arrival"` op
 
 ### Who chose the action
 
-`origin::event_origin` labels a recorded event from fields it already carries, so a recording stays readable without trusting a screenshot: `MANUAL` for an operator takeover (its recorded message says so), `SAFETY-REFLEX` for a flight goal the engine's opt-in reflex dispatched without a model request (the `reflex` event and the action's recorded messages say so), `FIXTURE` for the offline fixture's synthetic decision (`model == "offline-fixture"`), and `JEV-SELECTED` for a goal the configured model chose. Events that carry none of these — connections, observations, budgets and requests, and any `action` or `executor` row whose decision was recorded on the dispatch — get no label. The desktop timeline and `recording-report --chain` call the same helper, so the offline report shows the same separation as the GUI without a connection or a provider call.
+`origin::event_origin` labels a recorded event from fields it already carries: `JEV-SELECTED` and `JEV-ROUTER-SELECTED` identify the corresponding model decision and decision-bearing dispatch; the accepted `action` event has no decision object and keeps its origin in its message. The router's accepted action is recognized from that message. The decision-less accepted Jev action message is mapped to `JEV-SELECTED` from its preserved origin text. `FIXTURE` identifies the offline fixture's synthetic decision (`model == "offline-fixture"`), `MANUAL` identifies an operator takeover, and `SAFETY-REFLEX` identifies a flight goal dispatched by the opt-in reflex without a model request. The desktop timeline and `recording-report --chain` use the same helper. See [model routing](docs/model-routing.md) for the origin audit details.
 
 ## Development
 
@@ -172,10 +176,12 @@ See [architecture](docs/architecture.md) and [contributing](CONTRIBUTING.md).
 
 ## Limits and direction
 
-Automatic combat, mining, building, inventory manipulation and general task planning are not implemented. Threat awareness is limited to withdrawing from a listed hostile mob toward an observed waypoint; it has not been exercised against a live mob, and a stated session objective is information for the model, not a plan the engine executes. Endpoint/pathfinding guards do not guarantee harmless routes or server permission to run bots. Use an authorized test environment.
+General combat, mining, building and task planning remain unsupported. Opt-in Level 1 code can break whitelisted logs, craft bounded recipes and place a crafting table in an approved Java test world, but the complete live sequence has not been verified. Threat awareness is limited to withdrawing from a listed hostile mob toward an observed waypoint; it has not been exercised against a live mob, and a stated session objective is information for the model, not a plan the engine executes. Endpoint/pathfinding guards do not guarantee harmless routes or server permission to run bots. Use an authorized test environment.
 
 Farming Simulator 25 is the next proposed adapter, pending a separate mod-bridge investigation. Library scanning and additional Jev roles remain proposals: [scanner assessment](tasks/optiscaler-research.md), [Jev opportunities](tasks/jev-opportunities.md). Installation discovery does not prove ownership, subscription entitlement or AI support.
 
 ## Credits and license
 
 Built with TypeSafe/Jev, Azalea, egui/eframe and other open-source dependencies, informed by community game-agent projects. See [CREDITS.md](CREDITS.md) and [LICENSE](LICENSE). Third-party projects, game assets and services retain their own terms. This project is not affiliated with Mojang or Microsoft.
+
+Opt-in bounded gathering, crafting and table placement are described in [Wood skills](docs/wood-skills.md). Their full live sequence remains pending. See [current demo](docs/current-demo.md) for what can be shown today.

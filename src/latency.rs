@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::Duration};
 
 /// Rolling request latency, not network ping. Limits remain local and bounded.
 #[derive(Clone, Debug, Default)]
@@ -44,6 +44,28 @@ impl LatencyPolicy {
                 .map_or(5_000, |value| value.saturating_mul(2).clamp(1_500, 5_000)),
         }
     }
+
+    /// How long a peer may take to answer a bounded action, derived from the measured
+    /// acknowledgements themselves instead of a constant tuned to one user's connection.
+    /// Connection quality and model distance differ per user, so a fixed second would make
+    /// the engine behave differently for each of them. Until a measurement exists the
+    /// one-second floor applies, which is the previous behaviour; measured slow peers get
+    /// four times their p95, bounded to ten seconds so a stalled peer still fails.
+    pub fn action_budget(&self) -> Duration {
+        self.timing()
+            .p95_ms
+            .map_or(Duration::from_secs(1), |value| {
+                // Four times the measured p95, bounded above only. A fixed floor here would let a
+                // fast peer's budget be set by a constant instead of by what it actually answers,
+                // which is exactly how a measured ~150 ms peer ended up waiting a full second.
+                Duration::from_millis(value.saturating_mul(4).min(10_000))
+            })
+    }
+
+    /// The measured p95 of this policy, for reporting what a run actually observed.
+    pub fn p95_ms(&self) -> Option<u64> {
+        self.timing().p95_ms
+    }
 }
 
 /// Generation changes invalidate responses independently of latency policy.
@@ -59,6 +81,35 @@ pub fn answer_is_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_budget_follows_measurements_instead_of_a_fixed_second() {
+        assert_eq!(
+            LatencyPolicy::default().action_budget(),
+            Duration::from_secs(1),
+            "without a measurement the previous one-second floor applies"
+        );
+        let mut measured = LatencyPolicy::default();
+        measured.record(1_200);
+        assert_eq!(
+            measured.action_budget(),
+            Duration::from_millis(4_800),
+            "a measured slow peer gets four times its p95"
+        );
+        let mut live = LatencyPolicy::default();
+        live.record(152);
+        assert_eq!(
+            live.action_budget(),
+            Duration::from_millis(608),
+            "a measured 152 ms peer gets 608 ms, not a padded second"
+        );
+        measured.record(30_000);
+        assert_eq!(
+            measured.action_budget(),
+            Duration::from_secs(10),
+            "a stalled peer must still fail inside the bounded ceiling"
+        );
+    }
 
     #[test]
     fn warmup_accepts_slow_initial_answer_but_keeps_age_and_generation_bounds() {

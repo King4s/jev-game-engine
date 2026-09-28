@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use jev_game_engine::{
-    model::{Candidate, Decision, Event, Observation, Position, Recording, Settings},
-    recording,
+    model::{Candidate, Decision, Event, Mode, Observation, Position, Recording, Settings},
+    origin::{ActionOrigin, event_origin},
+    recording, routing,
 };
 use tempfile::tempdir;
 
@@ -36,6 +37,7 @@ fn recording() -> Recording {
                 ..Default::default()
             }),
             candidates: vec![Candidate {
+                skill: None,
                 id: "wait".into(),
                 description: "Wait".into(),
                 target: None,
@@ -66,6 +68,51 @@ fn recorded_facts_survive_loading_without_reinterpretation() {
         serde_json::to_value(&loaded).unwrap(),
         serde_json::to_value(&original).unwrap()
     );
+}
+
+fn router_recording() -> Recording {
+    let mut data = recording();
+    data.settings.mode = Mode::Live;
+    let decision = data.events[0].decision.as_mut().unwrap();
+    decision.model = routing::JEV_ROUTER_MODEL.into();
+    decision.probabilities.clear();
+    decision.confidence = None;
+    data
+}
+
+#[test]
+fn jev_router_recording_saves_and_loads_its_bounded_choice() {
+    let original = router_recording();
+    let saved = SavedFile(PathBuf::from(recording::save(&original).unwrap()));
+    let loaded = recording::load(saved.0.to_str().unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(
+        event_origin(&loaded.events[0]),
+        Some(ActionOrigin::RouterSelected)
+    );
+}
+
+#[test]
+fn jev_router_replay_rejects_unknown_choices_and_invented_metrics() {
+    let mut unknown = router_recording();
+    unknown.events[0].decision.as_mut().unwrap().choice = "missing".into();
+    assert!(recording::validate(&unknown).is_err());
+
+    let mut probabilities = router_recording();
+    probabilities.events[0]
+        .decision
+        .as_mut()
+        .unwrap()
+        .probabilities
+        .insert("wait".into(), 1.0);
+    assert!(recording::validate(&probabilities).is_err());
+
+    let mut confidence = router_recording();
+    confidence.events[0].decision.as_mut().unwrap().confidence = Some(1.0);
+    assert!(recording::validate(&confidence).is_err());
 }
 
 #[test]

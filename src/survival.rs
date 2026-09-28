@@ -149,6 +149,55 @@ pub fn nearest_threat(observation: &Observation) -> Option<Threat> {
     nearest_threat_within(observation, THREAT_RADIUS_M)
 }
 
+/// Shared policy for optional productive work. Thresholds are application policy,
+/// not a claim that food below this value makes a Minecraft action impossible.
+/// A blocked result cancels work; it does not authorize an unverified escape route.
+pub fn productive_work_blocker(observation: &Observation) -> Option<&'static str> {
+    if !observation.connected || !observation.health.is_finite() || observation.health <= 0.0 {
+        Some("Productive work blocked: unavailable or dead player")
+    } else if !observation.food.is_finite() || !(7.0..=20.0).contains(&observation.food) {
+        Some("Productive work blocked: food reserve is low or unknown")
+    } else if observation.entity_scan_incomplete {
+        Some("Productive work blocked: entity scan incomplete")
+    } else if nearest_threat(observation).is_some() {
+        Some("Productive work blocked: observed nearby threat")
+    } else {
+        None
+    }
+}
+
+/// Everything the model needs in order to judge whether working now is worth it. This is
+/// the old refusal reason, stated as a fact instead of a veto: the engine no longer
+/// decides for the model that a nearby threat makes work impossible.
+pub fn work_risk(observation: &Observation) -> Option<String> {
+    let mut parts = Vec::new();
+    if !observation.connected || !observation.health.is_finite() || observation.health <= 0.0 {
+        parts.push("no usable body".to_owned());
+    } else {
+        parts.push(format!("health {:.0} of 20", observation.health));
+    }
+    if !observation.food.is_finite() || !(7.0..=20.0).contains(&observation.food) {
+        parts.push(format!("food {:.0} of 20", observation.food));
+    }
+    if observation.entity_scan_incomplete {
+        parts.push("the entity scan was truncated, so unseen threats remain possible".to_owned());
+    }
+    if let Some(threat) = nearest_threat(observation) {
+        parts.push(format!(
+            "{} is {:.1} blocks away",
+            threat.kind, threat.distance_m
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The same facts, ready to append to a candidate description.
+pub fn work_risk_text(observation: &Observation) -> String {
+    work_risk(observation)
+        .map(|risk| format!(" Observed risk if you start now: {risk}."))
+        .unwrap_or_default()
+}
+
 /// Bounded flight goals, best first. Empty when no threat is inside the detection radius
 /// or when no observed cell helps — the honest case where the bot has nothing better
 /// than waiting.
@@ -243,6 +292,7 @@ pub fn flee_candidates(observation: &Observation, duration_ms: u64) -> Vec<Candi
                 )
             };
             Candidate {
+                skill: None,
                 id: format!("flee_{index}"),
                 description,
                 target: Some(landmark.position.clone()),

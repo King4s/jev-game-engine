@@ -1,4 +1,4 @@
-use crate::model::{Candidate, Decision, Mode, Recording};
+use crate::model::{Candidate, Decision, Event, Mode, Recording};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{
@@ -10,6 +10,40 @@ use std::{
 };
 
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// New recordings count provider attempts, including interrupted Astra work.
+/// Legacy recordings and offline fixtures retain request-event counting.
+pub fn request_count(recording: &Recording) -> u32 {
+    request_count_events(&recording.events, Some(&recording.id))
+}
+
+/// Count provider attempts when this session has stage telemetry. Older recordings
+/// and offline fixtures have only request events. An unrelated session's late stage
+/// event cannot switch a legacy recording away from that fallback.
+pub(crate) fn request_count_events(events: &[Event], session_id: Option<&str>) -> u32 {
+    let mut has_stages = false;
+    let mut started = 0;
+    for event in events.iter().filter(|event| event.kind == "model_stage") {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&event.message) else {
+            continue;
+        };
+        if session_id.is_some_and(|id| value["session_id"] != id) {
+            continue;
+        }
+        has_stages = true;
+        if value["stage"]["status"] == "started" {
+            started += 1;
+        }
+    }
+    if has_stages {
+        started
+    } else {
+        events
+            .iter()
+            .filter(|event| event.kind == "request")
+            .count() as u32
+    }
+}
 
 /// Writes a new recording without overwriting an existing session.
 pub fn save(recording: &Recording) -> Result<String> {
@@ -121,6 +155,22 @@ pub fn validate(recording: &Recording) -> Result<()> {
 }
 
 fn validate_decision(decision: &Decision, candidates: &[Candidate], mode: &Mode) -> Result<()> {
+    if decision.model == crate::routing::JEV_ROUTER_MODEL {
+        ensure!(*mode == Mode::Live, "Jev Router decision outside live mode");
+        ensure!(
+            crate::provider::candidate_ids(candidates)?.contains(decision.choice.as_str()),
+            "Jev Router selected an unavailable action"
+        );
+        ensure!(
+            decision.probabilities.is_empty() && decision.confidence.is_none(),
+            "Jev Router action must not contain probabilities or confidence"
+        );
+        return Ok(());
+    }
+    if decision.model == crate::routing::ASTRA_MODEL || decision.model.starts_with("gpt-6-astra-") {
+        ensure!(*mode == Mode::Live, "Astra decision outside live mode");
+        return crate::routing::validate_astra_decision(decision, candidates);
+    }
     if decision.model == "offline-fixture" {
         ensure!(
             *mode == Mode::Demo,

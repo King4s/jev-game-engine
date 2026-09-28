@@ -30,6 +30,8 @@ Sources: minecraft.wiki pages *Survival*, *Tutorial:Beginner's guide*, *Tutorial
 
 ## The ladder
 
+Every row and every subtask must follow the [Minecraft gameplay planning contract](../tasks/minecraft-gameplay-contract.md). Expand the complete player scenario, dependencies, access and return, failures and evidence before implementation. The engine-work column names primitives; implementing those primitives alone does not complete a level.
+
 | Level | In the game the bot can… | Verified by | Engine work needed (programmer) |
 |---|---|---|---|
 | **0 See** | Know where it is, the time of day, its health and hunger, what is in its inventory, and which useful blocks and animals are nearby (logs, stone, ores, sheep, cows, pigs). | Recorded observation matches RCON `data get entity` (Inventory, foodLevel, Health) and `time query minecraft:day`. | Observe inventory, hotbar, food level, time of day and nearby block/entity types, not only waypoints and threats. |
