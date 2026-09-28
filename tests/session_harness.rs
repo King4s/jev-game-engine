@@ -10,8 +10,12 @@
 use std::{collections::BTreeMap, path::PathBuf, process::Command as Process, time::Duration};
 
 use jev_game_engine::{
+    engine::EngineHandle,
     harness::{self, EndReason, SessionOptions},
-    model::{Decision, Event, FixtureWaypoint, Mode, Settings},
+    model::{
+        Candidate, Command, CraftingSlot, Decision, Event, FixtureWaypoint, Mode, Observation,
+        Settings,
+    },
     origin::{ActionOrigin, event_origin},
     recording,
 };
@@ -25,10 +29,14 @@ fn fixture_options(objective: &str, export: Option<PathBuf>) -> SessionOptions {
             safety_reflex: true,
             request_interval_ms: 0,
             max_requests: 2,
-            max_seconds: 60,
+            // The fixture offers exactly one reachable waypoint. Once it is reached there is
+            // nothing actionable, so the engine reports idling instead of spending a second
+            // request and the run ends on its time budget: keep that budget short.
+            max_seconds: 8,
             ..Settings::default()
         },
         connect_timeout: Duration::from_secs(8),
+        prestart_timeout: Duration::ZERO,
         export,
         keep_connected: false,
         verbose: false,
@@ -54,12 +62,46 @@ fn a_fixture_session_with_an_objective_and_the_reflex_ends_on_its_budget_and_exp
     assert_eq!(summary.mode, "Demo");
     assert_eq!(summary.objective, objective);
     assert!(summary.safety_reflex);
-    assert_eq!(summary.counts.requests, 2, "one request per budgeted goal");
-    assert_eq!(summary.counts.answers, 2);
+    // The fixture offers one reachable waypoint, and staying put is a real option in every world.
+    // So the engine asks once for the waypoint and, once that goal has arrived, asks again with the
+    // honest remaining option rather than deciding for the model that nothing should happen.
+    assert!(
+        summary.counts.requests >= 1,
+        "the fixture always has something to ask about: {:?}",
+        summary.end_detail
+    );
+    assert_eq!(
+        summary.counts.answers, summary.counts.requests,
+        "every request in the fixture is answered"
+    );
     assert_eq!(
         summary.counts.answers_wait + summary.counts.answers_waypoint + summary.counts.answers_flee,
-        2,
-        "every fixture answer is a wait or a waypoint goal"
+        summary.counts.requests,
+        "every fixture answer is one of the real decision kinds, never an empty choice"
+    );
+    // The completed waypoint is offered in exactly one request: once it has arrived, the geometry
+    // proves no verified step to it exists, so it must not come back on the menu.
+    let loaded = recording::load(export.to_str().unwrap())
+        .expect("the exported recording loads through the app's loader");
+    let requests: Vec<&_> = loaded
+        .events
+        .iter()
+        .filter(|event| event.kind == "request")
+        .collect();
+    assert!(
+        requests.iter().all(|event| !event.candidates.is_empty()),
+        "the engine must never send an empty menu"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|event| event
+                .candidates
+                .iter()
+                .any(|candidate| candidate.target.is_some()))
+            .count(),
+        1,
+        "exactly one request may offer the reachable waypoint, and it must not be offered after it arrived"
     );
     assert_eq!(
         summary.counts.reflex_actions, 0,
@@ -204,6 +246,8 @@ fn every_failure_has_its_own_non_zero_exit_code() {
         EndReason::ProviderFailed,
         EndReason::Disconnected,
         EndReason::Stalled,
+        EndReason::Died,
+        EndReason::PrerequisiteFailed,
     ];
     let codes: Vec<i32> = reasons.iter().map(|reason| reason.exit_code()).collect();
     assert_eq!(codes[0], 0, "only a budget end is a success");
@@ -214,6 +258,195 @@ fn every_failure_has_its_own_non_zero_exit_code() {
         reasons.len(),
         "codes must be distinct: {codes:?}"
     );
+}
+
+#[test]
+fn prestart_requires_current_dimension_and_empty_known_inventory() {
+    let mut observation = jev_game_engine::model::Observation {
+        connected: true,
+        sequence: 2,
+        dimension: Some("minecraft:hub".into()),
+        crafting_inventory: Some(empty_player_slots()),
+        ..Default::default()
+    };
+    assert_eq!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 2, Some(Duration::ZERO))
+            .as_deref(),
+        Some("waiting for a fresh observation")
+    );
+    assert!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 1, Some(Duration::ZERO))
+            .unwrap()
+            .contains("minecraft:hub")
+    );
+    observation.dimension = Some("minecraft:overworld".into());
+    observation.inventory.push("slot 0: Dirt x1".into());
+    assert!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 1, Some(Duration::ZERO))
+            .unwrap()
+            .contains("inventory")
+    );
+    observation.inventory.clear();
+    observation.items.insert("minecraft:dirt".into(), 1);
+    assert!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 1, Some(Duration::ZERO))
+            .unwrap()
+            .contains("inventory")
+    );
+    observation.items.clear();
+    observation.held_item = Some("minecraft:stick".into());
+    assert_eq!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 1, Some(Duration::ZERO))
+            .as_deref(),
+        Some("inventory is not empty")
+    );
+    observation.held_item = None;
+    assert_eq!(
+        harness::prestart_issue(&observation, "minecraft:overworld", 1, Some(Duration::ZERO)),
+        None
+    );
+}
+
+fn empty_player_slots() -> Vec<CraftingSlot> {
+    (9..45)
+        .map(|slot| CraftingSlot {
+            slot,
+            item: "minecraft:air".into(),
+            count: 0,
+        })
+        .collect()
+}
+
+#[test]
+fn prestart_requires_complete_empty_packet_confirmed_inventory() {
+    let mut observation = jev_game_engine::model::Observation {
+        connected: true,
+        sequence: 3,
+        dimension: Some("minecraft:overworld".into()),
+        ..Default::default()
+    };
+    let issue = |observation: &Observation| {
+        harness::prestart_issue(observation, "minecraft:overworld", 2, Some(Duration::ZERO))
+    };
+    assert_eq!(
+        issue(&observation).as_deref(),
+        Some("inventory unavailable")
+    );
+    observation.crafting_inventory = Some(empty_player_slots());
+    observation.crafting_inventory.as_mut().unwrap()[0].count = 1;
+    assert_eq!(
+        issue(&observation).as_deref(),
+        Some("inventory is not empty")
+    );
+    observation.crafting_inventory.as_mut().unwrap()[0].count = 0;
+    observation.crafting_inventory.as_mut().unwrap().pop();
+    assert_eq!(
+        issue(&observation).as_deref(),
+        Some("inventory unavailable")
+    );
+    observation.crafting_inventory = Some(empty_player_slots());
+    assert_eq!(issue(&observation), None);
+}
+
+#[test]
+fn prestart_requires_a_recent_sequence_advance() {
+    let observation = jev_game_engine::model::Observation {
+        connected: true,
+        sequence: 3,
+        dimension: Some("minecraft:overworld".into()),
+        crafting_inventory: Some(empty_player_slots()),
+        ..Default::default()
+    };
+    let issue =
+        |initial, age| harness::prestart_issue(&observation, "minecraft:overworld", initial, age);
+    assert_eq!(
+        issue(3, Some(Duration::ZERO)).as_deref(),
+        Some("waiting for a fresh observation")
+    );
+    assert_eq!(
+        issue(2, None).as_deref(),
+        Some("waiting for a fresh observation")
+    );
+    assert_eq!(
+        issue(2, Some(Duration::from_millis(501))).as_deref(),
+        Some("waiting for a fresh observation")
+    );
+    assert_eq!(issue(2, Some(Duration::from_millis(500))), None);
+}
+
+#[test]
+fn fixture_cannot_request_a_live_wood_prestart_gate() {
+    let mut options = fixture_options("", None);
+    options.prestart_timeout = Duration::from_secs(3);
+    options.settings.wood_skills = true;
+    assert!(
+        options
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("live wood")
+    );
+}
+
+/// Regression for the first live night run, which ended as `provider_failed` 21 s in when
+/// the bot was moved from the hub into the test world: a world change is a local stop the
+/// harness resumes from, not the end of the session. Damage the bot survives is resumed too,
+/// so a survival objective goes on; no health left is its own end reason.
+#[test]
+fn a_world_change_while_connected_resumes_instead_of_ending_the_session() {
+    use harness::{ErrorOutcome, classify_error};
+    use jev_game_engine::engine::{
+        BOT_DIED, DIMENSION_CHANGED, HEALTH_DECREASED, WORLD_LIFECYCLE_CHANGED,
+    };
+
+    let alive = Some(20.0);
+    for error in [DIMENSION_CHANGED, WORLD_LIFECYCLE_CHANGED, HEALTH_DECREASED] {
+        assert_eq!(
+            classify_error(error, true, alive),
+            ErrorOutcome::Resume,
+            "{error}"
+        );
+        assert_eq!(
+            classify_error(error, false, alive),
+            ErrorOutcome::End(EndReason::Disconnected),
+            "a world change without a connection is a disconnect: {error}"
+        );
+    }
+    let cases = [
+        ("Request budget reached", true, EndReason::Budget),
+        ("Session time budget reached", true, EndReason::Budget),
+        (
+            "Session time budget reached",
+            false,
+            EndReason::Disconnected,
+        ),
+        (
+            "Adapter returned invalid observation values",
+            true,
+            EndReason::Disconnected,
+        ),
+        ("TypeSafe request failed", true, EndReason::ProviderFailed),
+    ];
+    for (error, connected, reason) in cases {
+        assert_eq!(
+            classify_error(error, connected, alive),
+            ErrorOutcome::End(reason),
+            "{error} (connected {connected})"
+        );
+    }
+    // The adapter's death count ends the session even when the respawned bot is healthy
+    // and connected in another world, which is what the live run hid as a world change.
+    assert_eq!(
+        classify_error(BOT_DIED, true, alive),
+        ErrorOutcome::End(EndReason::Died)
+    );
+    for (connected, health) in [(true, Some(0.0)), (false, Some(0.0)), (true, None)] {
+        assert_eq!(
+            classify_error(HEALTH_DECREASED, connected, health),
+            ErrorOutcome::End(EndReason::Died),
+            "connected {connected}, health {health:?}"
+        );
+    }
 }
 
 fn decision(choice: &str, model: &str) -> Decision {
@@ -330,6 +563,127 @@ fn counts_separate_wait_waypoint_flee_answers_and_reflex_actions() {
     assert_eq!(counts.arrival_verdicts, 0);
 }
 
+/// A refusal never ends the run, so the recording's own classification is how a session
+/// says how much of what the model chose the engine could not carry out. A refused action
+/// carries the candidate it refused; a dropped model answer carries none and stays its own
+/// class.
+#[test]
+fn counts_separate_a_refused_action_from_a_rejected_answer() {
+    let mut refused = event(
+        1,
+        "rejected",
+        "Local guard rejected action 'goal_soil': no local executor in this build runs it (no skill, no target, and it is not a bounded wait/stop action)",
+        None,
+    );
+    refused.candidates = vec![Candidate {
+        skill: None,
+        id: "goal_soil".into(),
+        description: "Goal 5/9 (bounded catalogue, ladder order)".into(),
+        target: None,
+        duration_ms: 60_000,
+    }];
+    let events = vec![
+        refused,
+        event(
+            2,
+            "rejected",
+            "TypeSafe answer rejected: probabilities do not sum to one",
+            None,
+        ),
+    ];
+    let counts = harness::counts(&events);
+    assert_eq!(counts.refused_actions, 1, "the refused goal is counted");
+    assert_eq!(
+        counts.rejected_answers, 1,
+        "a dropped answer is classified apart from a refused action"
+    );
+    assert_eq!(counts.accepted_actions, 0, "a refusal executes nothing");
+}
+
+#[test]
+fn routed_attempts_count_each_provider_start_in_summary_and_replay() {
+    let session_id = "routed-session";
+    let events = vec![
+        event(1, "request", "one routed goal", None),
+        event(
+            2,
+            "model_stage",
+            &format!(r#"{{"session_id":"{session_id}","stage":{{"status":"started"}}}}"#),
+            None,
+        ),
+        event(
+            3,
+            "model_stage",
+            &format!(r#"{{"session_id":"{session_id}","stage":{{"status":"completed"}}}}"#),
+            None,
+        ),
+        event(
+            4,
+            "model_stage",
+            &format!(r#"{{"session_id":"{session_id}","stage":{{"status":"started"}}}}"#),
+            None,
+        ),
+        event(
+            5,
+            "model_stage",
+            r#"{"session_id":"previous-session","stage":{"status":"started"}}"#,
+            None,
+        ),
+    ];
+    let recording = jev_game_engine::model::Recording {
+        schema_version: 1,
+        id: session_id.into(),
+        settings: Settings::default(),
+        events,
+    };
+    assert_eq!(
+        harness::counts_for_session(&recording.events, &recording.id).requests,
+        2,
+        "summary counts Jev and Astra starts, not the one routed request event"
+    );
+    assert_eq!(recording::request_count(&recording), 2, "replay agrees");
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("routed.json");
+    std::fs::write(&path, serde_json::to_vec(&recording).unwrap()).unwrap();
+    let engine = EngineHandle::new();
+    engine.send(Command::Replay(path.to_string_lossy().into_owned()));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let replay = engine.snapshot();
+        if replay.replay {
+            assert_eq!(replay.requests, 2, "replay view uses the same count");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "replay did not load");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn unrelated_stage_telemetry_keeps_legacy_request_counting() {
+    let events = vec![
+        event(1, "request", "legacy request", None),
+        event(
+            2,
+            "model_stage",
+            r#"{"session_id":"previous-session","stage":{"status":"started"}}"#,
+            None,
+        ),
+    ];
+    let recording = jev_game_engine::model::Recording {
+        schema_version: 1,
+        id: "legacy-session".into(),
+        settings: Settings::default(),
+        events,
+    };
+    assert_eq!(
+        harness::counts_for_session(&recording.events, &recording.id).requests,
+        1
+    );
+    assert_eq!(recording::request_count(&recording), 1);
+}
+
 fn session_run(args: &[&str], with_key: bool) -> (i32, String) {
     let mut command = Process::new(env!("CARGO_BIN_EXE_session-run"));
     command.args(args);
@@ -361,6 +715,14 @@ fn the_cli_refuses_invalid_input_with_one_line_and_exit_code_2() {
             vec!["--fixture", "--request-interval-seconds", "86401"],
         ),
         ("zero requests", vec!["--fixture", "--max-requests", "0"]),
+        (
+            "prestart over limit",
+            vec!["--fixture", "--prestart-seconds", "301"],
+        ),
+        (
+            "prestart requires live wood",
+            vec!["--fixture", "--prestart-seconds", "1"],
+        ),
         (
             "seconds over a week",
             vec!["--fixture", "--max-seconds", "604801"],
@@ -398,7 +760,7 @@ fn live_mode_without_a_key_is_refused_before_connecting() {
 }
 
 #[test]
-fn pacing_holds_the_second_request_back_by_at_least_the_interval() {
+fn pacing_does_not_turn_internal_observation_into_a_second_request() {
     let mut options = fixture_options("Survive the night", None);
     options.settings.request_interval_ms = 1_000;
     options.settings.max_requests = 2;
@@ -412,17 +774,20 @@ fn pacing_holds_the_second_request_back_by_at_least_the_interval() {
     let path = summary.recording_path.expect("exported");
     let recorded = recording::load(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
-    let requests: Vec<u64> = recorded
+    let requests: Vec<_> = recorded
         .events
         .iter()
         .filter(|event| event.kind == "request")
-        .map(|event| event.elapsed_ms)
         .collect();
-    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests.len(), 1, "no model request without an action");
+    assert!(recorded.events.iter().any(|event| {
+        event.kind == "idle" && event.message.contains("No actionable candidate")
+    }));
     assert!(
-        requests[1] - requests[0] >= 1_000,
-        "the paced second request came {} ms after the first",
-        requests[1] - requests[0]
+        requests[0]
+            .candidates
+            .iter()
+            .all(|candidate| candidate.id != "wait")
     );
     assert_eq!(recorded.settings.request_interval_ms, 1_000);
 }
@@ -444,6 +809,7 @@ fn help_prints_every_flag_and_exits_zero() {
         "--max-seconds",
         "--export",
         "--keep-connected",
+        "--prestart-seconds",
     ] {
         assert!(text.contains(flag), "--help must list {flag}");
     }

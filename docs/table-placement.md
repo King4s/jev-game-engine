@@ -1,0 +1,11 @@
+# Bounded crafting-table placement
+
+The bound operation names one currently observed placement site, its support, the packet-confirmed source inventory slot and the intended hotbar slot. Inventory geometry uses Java player storage slots 9–44 and hotbar slots 36–44; a main-storage table requires an empty hotbar destination. Neither the model nor historical coordinates can add placement sites.
+
+The native site check must establish a clear destination outside the player's body, stable non-interactive support, current sight/reach and at least one preserved adjacent exit. Revalidate these conditions before inventory staging, hand selection and the actual use-item packet. Require a real upward support-face hit rather than fabricated hit coordinates. A changed world, missing item, interruption, deadline or competing inventory interaction cancels future steps.
+
+Success requires a matching server-confirmed attempt/epoch outcome, one fewer table in inventory and an observed table at the exact destination. Sending a click, selecting a hotbar slot or seeing another table is insufficient.
+
+Native execution now emits bounded adjacent sites from the current visible frame, preserves a second clear adjacent exit, and permits only stone, cobblestone, dirt and grass-block supports. It stages a main-storage table into an empty hotbar slot using a server-confirmed swap, selects the held item, requires a real upward hit on the bound support and sends one use-item packet. It awaits an exact inbound table block update and the exact expected inventory decrement. Cancellation clears the executor; there is no retry of an unconfirmed use-item packet.
+
+This conservative initial policy can reject otherwise valid Minecraft placements, including unsupported support materials. The full site/exit observation may survive the look-down transition for at most 250ms; any inbound block, section, chunk replacement or unload invalidates it before the use-item packet. Current stance, world, health, inventory and actual support-face hit are still checked. This is a short current-action observation window, not persistent world memory. Deterministic native lifecycle tests and live placement verification remain pending; compiled implementation is not evidence of successful gameplay.

@@ -19,7 +19,10 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use jev_game_engine::{
-    harness::{self, MAX_REQUEST_INTERVAL_S, MAX_REQUESTS, MAX_SESSION_SECONDS, SessionOptions},
+    harness::{
+        self, MAX_PRESTART_SECONDS, MAX_REQUEST_INTERVAL_S, MAX_REQUESTS, MAX_SESSION_SECONDS,
+        SessionOptions,
+    },
     model::{FixtureWaypoint, Mode, Settings},
 };
 
@@ -32,19 +35,25 @@ session-run: one budgeted multi-goal session, headless, through the real engine.
   --bot <name>                       offline bot identity, alphanumeric/underscore (default JevBot)
   --legacy-forwarding                opt in to legacy forwarding for the configured bot identity
   --objective <text>                 operator's session goal, at most 400 characters
+  --wood-skills                     opt in to bounded log gathering, crafting and table placement
+  --allowed-dimension <registry-id>  permitted wood dimension (default minecraft:overworld)
   --safety-reflex                    let the engine dispatch bounded flight goals itself
   --request-interval-seconds <0-86400>  minimum gap between model requests (default 0)
   --max-requests <1-100000>          request budget (default 30)
   --max-seconds <1-604800>           session time budget from Connect (default 300)
+  --route-min-confidence <0-1>       minimum route choice probability this run accepts (default 0.5)
   --connect-seconds <1-300>          budget for the first connected observation (default 60)
+  --prestart-seconds <0-300>         live wood setup wait for permitted dimension and empty inventory (default 0)
   --export <file.json>               move the exported recording here (default: under runs/)
   --keep-connected                   leave the bot in the world at the end
   --quiet                            print only the summary
 
 Exit codes: 0 the session ended on its own budget while connected, 1 connection failure,
 2 invalid arguments or missing key, 6 provider failure, 7 the bot disconnected during the
-session, 8 the session neither ended nor failed inside the wall-clock guard.
-The harness never edits blocks and never changes server configuration.";
+session, 8 the session neither ended nor failed inside the wall-clock guard, 9 the bot died,
+10 the pre-Start world/inventory prerequisite timed out.
+A world change or damage the bot survives is a local stop the harness resumes.
+Wood skills permit bounded log gathering, plank/table crafting and conservative table placement; the harness never changes server configuration.";
 
 fn main() {
     match run() {
@@ -102,6 +111,9 @@ fn run() -> Result<i32> {
         },
         objective,
         safety_reflex: flag("--safety-reflex"),
+        wood_skills: flag("--wood-skills"),
+        allowed_dimension: value("--allowed-dimension")
+            .unwrap_or_else(|| "minecraft:overworld".into()),
         request_interval_ms: number(
             &args,
             "--request-interval-seconds",
@@ -111,6 +123,19 @@ fn run() -> Result<i32> {
         )? * 1_000,
         max_requests: number(&args, "--max-requests", 30, 1, MAX_REQUESTS)? as u32,
         max_seconds: number(&args, "--max-seconds", 300, 1, MAX_SESSION_SECONDS)?,
+        route_min_confidence: match value("--route-min-confidence") {
+            None => jev_game_engine::routing::ROUTE_MIN_CONFIDENCE_DEFAULT,
+            Some(text) => {
+                let parsed: f64 = text
+                    .parse()
+                    .with_context(|| "--route-min-confidence must be a number from 0 to 1")?;
+                ensure!(
+                    (0.0..=1.0).contains(&parsed),
+                    "--route-min-confidence must be a number from 0 to 1"
+                );
+                parsed
+            }
+        },
     };
     if mode == Mode::Live {
         ensure!(
@@ -121,11 +146,25 @@ fn run() -> Result<i32> {
     let options = SessionOptions {
         settings,
         connect_timeout: Duration::from_secs(number(&args, "--connect-seconds", 60, 1, 300)?),
+        prestart_timeout: Duration::from_secs(number(
+            &args,
+            "--prestart-seconds",
+            0,
+            0,
+            MAX_PRESTART_SECONDS,
+        )?),
         export: value("--export").map(PathBuf::from),
         keep_connected: flag("--keep-connected"),
         verbose: !flag("--quiet"),
     };
     options.validate()?;
+    if let Some(warning) = harness::safety_reflex_warning(
+        &options.settings.mode,
+        options.settings.wood_skills,
+        options.settings.safety_reflex,
+    ) {
+        eprintln!("{warning}");
+    }
 
     println!(
         "{} session: objective {:?}, safety reflex {}, pacing {} s, budgets {} requests / {} s",

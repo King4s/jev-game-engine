@@ -136,9 +136,23 @@ async fn probe(
             .filter(|b| b.name.starts_with("waypoint:"))
             .count()
     );
+    // One JSON line with the Survival level-0 view, so an operator can check it at a glance.
+    println!(
+        "Observed survival view: {}",
+        serde_json::json!({
+            "time_of_day": observation.time_of_day,
+            "health": observation.health,
+            "food": observation.food,
+            "held_item": observation.held_item,
+            "items": observation.items,
+            "resources": observation.resources,
+            "note": observation.note,
+        })
+    );
     let local_move = args.iter().any(|s| s == "--local-move");
     if args.iter().any(|s| s == "--jev") || local_move {
         let mut candidates = vec![Candidate {
+            skill: None,
             id: "wait".into(),
             description: "Wait without moving".into(),
             target: None,
@@ -163,6 +177,7 @@ async fn probe(
             && let Some(landmark) = waypoint
         {
             candidates.push(Candidate {
+                skill: None,
                 id: "navigate".into(),
                 description: "Navigate to the verified nearby waypoint without mining".into(),
                 target: Some(landmark.position.clone()),
@@ -210,7 +225,9 @@ async fn probe(
         let before = current_observation(adapter)?;
         print_position("Before action", &before);
         let (request, acknowledged) = ActionRequest::new(selected, &observation);
-        adapter.commands.send(AdapterCommand::Execute(request))?;
+        adapter
+            .commands
+            .send(AdapterCommand::Execute(Box::new(request)))?;
         tokio::time::timeout(Duration::from_secs(3), acknowledged)
             .await
             .context("Adapter action acknowledgement timed out")?

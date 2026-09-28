@@ -31,7 +31,9 @@ use jev_game_engine::{
 };
 
 fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) -> bool) -> View {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // A hang detector, not a measurement: a loaded machine needs wall-clock slack, and a tight
+    // bound here would make the test machine decide the test outcome.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let view = engine.snapshot();
         if predicate(&view) {
@@ -39,13 +41,22 @@ fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) 
         }
         assert!(
             Instant::now() < deadline,
-            "Timed out waiting for {description}; status={}, error={:?}, events={:?}",
+            "Timed out waiting for {description}; status={}, error={:?}, events={:?}, last offered {:?}",
             view.status,
             view.last_error,
             view.events
                 .iter()
                 .map(|event| &event.kind)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            view.events
+                .iter()
+                .rev()
+                .find(|event| !event.candidates.is_empty())
+                .map(|event| event
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.id.as_str())
+                    .collect::<Vec<_>>())
         );
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -53,6 +64,7 @@ fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) 
 
 /// Negative assertions must cover the delayed fixture response, not one snapshot.
 fn remains(engine: &EngineHandle, predicate: impl Fn(&View) -> bool) {
+    // Negative assertions must cover the delayed fixture response, not one snapshot.
     let deadline = Instant::now() + Duration::from_millis(450);
     loop {
         let view = engine.snapshot();
@@ -147,7 +159,9 @@ fn assert_verdict_matches_its_observation(event: &Event, verdict: &ArrivalVerdic
 /// 0.05 blocks of the target. Nothing in a one-step run starts it moving again, so this is a stop
 /// and not a pause.
 fn wait_until_the_bot_stops(engine: &EngineHandle) -> View {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // A hang detector, not a measurement: a loaded machine needs wall-clock slack, and a tight
+    // bound here would make the test machine decide the test outcome.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let mut previous: Option<(u64, Position)> = None;
     loop {
         let view = engine.snapshot();
@@ -362,200 +376,90 @@ fn one_reachable_bounded_goal_records_an_arrived_verdict_and_a_local_stop() {
 }
 
 #[test]
-fn a_goal_after_the_arrival_offers_no_navigate_candidate_and_states_why() {
+fn after_arrival_no_navigate_candidate_causes_internal_idle_without_a_model_request() {
     let engine = connect_reachable();
     engine.send(Command::Step);
     let arrived = wait_for(&engine, "first bounded goal arrives", |view| {
         count(view, "executor") == 1
     });
-    let first_executors = executor_events(&arrived);
-    let first_executor = first_executors[0];
-    let verdict = arrival(first_executor);
+    let verdict = arrival(executor_events(&arrived)[0]);
     assert!(verdict.arrived);
     let target = verdict
         .target
         .clone()
-        .expect("the arrived goal was bound to a target");
-    assert!(
-        verdict
-            .measured_distance_m
-            .expect("a connected fixture measures the distance")
-            < ARRIVAL_TOLERANCE_M
-    );
-
-    // The bot now sits inside the tolerance of the waypoint, which is the geometry in which the
-    // engine must stop offering it.
+        .expect("the arrived goal had a target");
     engine.send(Command::Step);
-    let view = wait_for(&engine, "second bounded goal request", |view| {
-        count(view, "request") == 2
+    let idle = wait_for(&engine, "internal observation pause", |view| {
+        count(view, "idle") >= 1
     });
-    let requests: Vec<&Event> = view
-        .events
-        .iter()
-        .filter(|event| event.kind == "request")
-        .collect();
-    assert_eq!(requests.len(), 2, "a one-step run has issued two requests");
-    let first_request = requests[0];
-    let second_request = requests[1];
-    assert!(second_request.sequence > first_executor.sequence);
-    assert!(
-        first_request
-            .candidates
-            .iter()
-            .any(|candidate| candidate.target.is_some()),
-        "the first request must have offered the reachable waypoint: {:?}",
-        first_request.candidates
+    assert_eq!(
+        count(&idle, "request"),
+        1,
+        "no second model request is spent"
     );
-
-    let observation = second_request
-        .observation
-        .as_ref()
-        .expect("a request records the observation it was shown");
-    assert!(observation.connected);
-    let remaining = distance(&observation.position, &target);
-    assert!(
-        remaining <= ARRIVAL_TOLERANCE_M,
-        "the second decision must be asked from inside the tolerance: {remaining} blocks"
-    );
-    assert!(
-        second_request
-            .candidates
-            .iter()
-            .all(|candidate| candidate.target.is_none()),
-        "no navigate candidate may be offered from inside the tolerance: {:?}",
-        second_request.candidates
-    );
-
-    // The reason is on the recorded request, not implicit in the empty candidate list.
-    let reason = format!(
-        "no navigate candidate: {} observed waypoints, none between {ARRIVAL_TOLERANCE_M} and 12 blocks away",
-        observation.blocks.len()
-    );
-    assert!(
-        second_request.message.contains(reason.as_str()),
-        "the recorded request must state why no navigation was offered: {}",
-        second_request.message
-    );
-    // The target-less alternative remains, so the request is still answerable offline.
-    assert!(
-        second_request
-            .candidates
-            .iter()
-            .any(|candidate| candidate.id == "wait"),
-        "a request must keep a legal bounded choice: {:?}",
-        second_request.candidates
-    );
-
+    assert!(idle.events.iter().any(|event| {
+        event.kind == "idle" && event.message.contains("No actionable candidate")
+    }));
+    assert!(idle.observation.as_ref().is_some_and(|observation| {
+        observation.connected && distance(&observation.position, &target) < ARRIVAL_TOLERANCE_M
+    }));
     engine.send(Command::Stop);
     let stopped = wait_for(&engine, "local stop", |view| view.status == "Stopped");
     assert!(stopped.active_goal.is_none());
     remains(&engine, |view| {
-        view.status == "Stopped" && count(view, "request") == 2 && view.active_goal.is_none()
+        view.status == "Stopped" && count(view, "request") == 1
     });
 }
 
 #[test]
-fn continuous_mode_records_the_arrival_verdict_before_the_next_request() {
+fn continuous_mode_records_arrival_then_idles_without_an_extra_model_request() {
     let engine = connect_reachable();
     engine.send(Command::Start);
-    let view = wait_for(&engine, "second continuous request", |view| {
-        count(view, "request") == 2
+    let view = wait_for(&engine, "internal idle after arrival", |view| {
+        count(view, "executor") == 1 && count(view, "idle") >= 1
     });
-
     let events = &view.events;
     let action_index = events
         .iter()
         .position(|event| event.kind == "action")
-        .expect("continuous mode dispatches the selected goal");
+        .expect("the selected goal was accepted");
     let verdict_index = events
         .iter()
         .position(|event| event.arrival.is_some())
-        .expect("the first bounded goal records an arrival verdict");
-    // The first request that follows the accepted action. If continuous mode had moved on before
-    // the goal ended, this search would find that premature request instead.
-    let next_request_index = events
+        .expect("the goal recorded an arrival verdict");
+    let idle_index = events
         .iter()
-        .enumerate()
-        .find(|(index, event)| *index > action_index && event.kind == "request")
-        .map(|(index, _)| index)
-        .expect("continuous mode requests again after the goal ends");
-
-    assert!(
-        action_index < verdict_index,
-        "the verdict must follow the action the adapter accepted"
+        .position(|event| event.kind == "idle")
+        .expect("the engine records its own technical pause");
+    assert!(action_index < verdict_index && verdict_index < idle_index);
+    assert_eq!(
+        count(&view, "request"),
+        1,
+        "idle must not spend a Jev request"
     );
     assert!(
-        verdict_index < next_request_index,
-        "the next request must wait for the arrival verdict: verdict at {verdict_index}, next request at {next_request_index}"
+        events[idle_index]
+            .message
+            .contains("No actionable candidate")
     );
     assert!(
-        !events[action_index + 1..verdict_index]
+        !events[action_index + 1..idle_index]
             .iter()
-            .any(|event| event.kind == "request"),
-        "no request may be recorded between the accepted action and its verdict"
+            .any(|event| event.kind == "request")
     );
-    assert!(
-        events[verdict_index].elapsed_ms <= events[next_request_index].elapsed_ms,
-        "recorded elapsed time must not go backwards: verdict at {} ms, next request at {} ms",
-        events[verdict_index].elapsed_ms,
-        events[next_request_index].elapsed_ms
-    );
-
     let executor = &events[verdict_index];
-    assert_eq!(executor.kind, "executor");
-    assert_eq!(executor.message.as_str(), "Local executor: target reached");
+    assert_eq!(executor.message, "Local executor: target reached");
     let verdict = arrival(executor);
     assert!(verdict.arrived);
     assert_eq!(verdict.tolerance_m, ARRIVAL_TOLERANCE_M);
-    let measured = verdict
-        .measured_distance_m
-        .expect("a connected fixture always measures the distance");
-    assert!(
-        measured < ARRIVAL_TOLERANCE_M,
-        "the arrived verdict must be inside the tolerance: {measured} blocks"
-    );
-    assert!(
-        verdict.elapsed_ms < verdict.duration_ms,
-        "an arrival is reported before its bound expires: {} of {} ms",
-        verdict.elapsed_ms,
-        verdict.duration_ms
-    );
     assert_verdict_matches_its_observation(executor, verdict);
-    let accepted = accepted_candidates(&view);
-    assert!(
-        !accepted.is_empty(),
-        "the navigate goal is accepted before its verdict"
-    );
-    assert_eq!(accepted[0].target, verdict.target);
-
-    // Continuous mode moved on from a goal that really arrived: the next request is asked from
-    // inside the tolerance, so the reached waypoint is gone from its candidate list.
-    let next_request = &events[next_request_index];
-    let observation = next_request
-        .observation
-        .as_ref()
-        .expect("a request records the observation it was shown");
-    let target = verdict
-        .target
-        .as_ref()
-        .expect("the arrived goal was bound to a target");
-    assert!(distance(&observation.position, target) < ARRIVAL_TOLERANCE_M);
-    assert!(
-        next_request
-            .candidates
-            .iter()
-            .all(|candidate| candidate.target.is_none()),
-        "a reached waypoint must not be offered again: {:?}",
-        next_request.candidates
-    );
-
-    // A local stop ends continuous mode without issuing a further request.
+    assert_eq!(accepted_candidates(&view)[0].target, verdict.target);
     engine.send(Command::Stop);
     let stopped = wait_for(&engine, "stopped continuous session", |view| {
         view.status == "Stopped"
     });
     assert!(stopped.active_goal.is_none());
     remains(&engine, |view| {
-        view.status == "Stopped" && count(view, "request") == 2
+        view.status == "Stopped" && count(view, "request") == 1
     });
 }

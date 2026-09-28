@@ -1,7 +1,7 @@
 //! Offline coverage for the attribution rule the desktop timeline and the offline recording
 //! report share.
 //!
-//! These three origins are what keeps model-selected navigation, the synthetic fixture and an
+//! These origins keep model-selected navigation, the synthetic fixture and an
 //! operator takeover distinguishable inside one recording, so the tests pin both the
 //! classification derived from an event's own fields and the exact labels that reach the screen.
 //! Everything here runs against the synthetic fixture: no Minecraft connection, no provider call.
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use jev_game_engine::{
     engine::EngineHandle,
-    model::{Candidate, Command, Decision, Event, Settings, View},
+    model::{Command, Decision, Event, Settings, View},
     origin::{ActionOrigin, event_origin},
 };
 
@@ -42,7 +42,9 @@ fn event(kind: &str, message: &str, model: Option<&str>) -> Event {
 }
 
 fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) -> bool) -> View {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // A hang detector, not a measurement: a loaded machine needs wall-clock slack, and a tight
+    // bound here would make the test machine decide the test outcome.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let view = engine.snapshot();
         if predicate(&view) {
@@ -76,15 +78,19 @@ fn connect_fixture() -> EngineHandle {
     engine
 }
 
-/// The manual choices the engine offers are bound to the current observation.
-fn manual_wait(view: &View) -> Command {
+/// The manual choices the engine offers are bound to the current observation, so an operator
+/// takeover has to pick one the candidate generator actually produced. There is no `wait`
+/// candidate any more, and the engine refuses a manual action that is not among the candidates
+/// it derives from the observation, so the takeover targets the fixture's waypoint instead.
+fn manual_waypoint(view: &View) -> Command {
+    let candidate = view
+        .manual_candidates
+        .iter()
+        .find(|candidate| candidate.id.starts_with("waypoint_"))
+        .expect("the fixture observation offers a waypoint to navigate to")
+        .clone();
     Command::Manual {
-        candidate: Candidate {
-            id: "wait".into(),
-            description: "Wait without moving".into(),
-            target: None,
-            duration_ms: view.goal_ms,
-        },
+        candidate,
         world_epoch: view.observation.as_ref().map_or(0, |o| o.world_epoch),
         dimension: view.observation.as_ref().and_then(|o| o.dimension.clone()),
     }
@@ -136,6 +142,85 @@ fn a_configured_model_goal_is_labelled_jev_selected_on_all_four_goal_rows() {
 }
 
 #[test]
+fn a_jev_router_goal_keeps_its_own_origin_through_acceptance() {
+    for kind in ["decision", "dispatched", "action", "executor"] {
+        assert_eq!(
+            event_origin(&event(
+                kind,
+                "Jev Router selected goal; local executor",
+                Some("typesafe/jev-router")
+            )),
+            Some(ActionOrigin::RouterSelected),
+            "{kind} row must show which model selected the action"
+        );
+    }
+    assert_eq!(
+        event_origin(&event(
+            "action",
+            "Jev Router selected goal; local executor; adapter accepted bounded action: wait",
+            None
+        )),
+        Some(ActionOrigin::RouterSelected),
+        "the accepted action has no decision field, so its recorded message carries the origin"
+    );
+    assert_eq!(
+        event_origin(&event(
+            "action",
+            "adapter accepted bounded action: wait",
+            None
+        )),
+        None,
+        "a legacy decision-less action with no origin marker remains unlabelled"
+    );
+}
+
+#[test]
+fn a_jev_self_goal_keeps_its_origin_on_the_decision_less_accepted_action() {
+    let accepted = "Jev selected goal; local executor; adapter accepted bounded action: wait";
+    assert_eq!(
+        event_origin(&event("action", accepted, None)),
+        Some(ActionOrigin::JevSelected)
+    );
+    assert_eq!(event_origin(&event("request", accepted, None)), None);
+    assert_eq!(
+        event_origin(&event("action", accepted, Some("offline-fixture"))),
+        Some(ActionOrigin::Fixture)
+    );
+    assert_eq!(
+        event_origin(&event(
+            "action",
+            &format!("Manual action; {accepted}"),
+            None
+        )),
+        Some(ActionOrigin::Manual)
+    );
+    assert_eq!(
+        event_origin(&event(
+            "action",
+            &format!("SAFETY-REFLEX; {accepted}"),
+            None
+        )),
+        Some(ActionOrigin::SafetyReflex)
+    );
+}
+
+#[test]
+fn historical_astra_origin_remains_distinct_from_jev_router() {
+    assert_eq!(
+        event_origin(&event("decision", "validated", Some("gpt-6-astra"))),
+        Some(ActionOrigin::AstraSelected)
+    );
+    assert_eq!(
+        event_origin(&event(
+            "action",
+            "Astra selected goal; local executor; adapter accepted bounded action: wait",
+            None
+        )),
+        Some(ActionOrigin::AstraSelected)
+    );
+}
+
+#[test]
 fn engine_bookkeeping_and_decision_less_goal_rows_record_no_origin() {
     for kind in [
         "connect",
@@ -169,13 +254,17 @@ fn engine_bookkeeping_and_decision_less_goal_rows_record_no_origin() {
 }
 
 #[test]
-fn the_four_labels_are_exact_and_distinct() {
+fn the_origin_labels_are_exact_and_distinct() {
     assert_eq!(ActionOrigin::JevSelected.label(), "JEV-SELECTED");
+    assert_eq!(ActionOrigin::RouterSelected.label(), "JEV-ROUTER-SELECTED");
+    assert_eq!(ActionOrigin::AstraSelected.label(), "ASTRA-SELECTED");
     assert_eq!(ActionOrigin::Fixture.label(), "FIXTURE");
     assert_eq!(ActionOrigin::Manual.label(), "MANUAL");
     assert_eq!(ActionOrigin::SafetyReflex.label(), "SAFETY-REFLEX");
     let labels = [
         ActionOrigin::JevSelected.label(),
+        ActionOrigin::RouterSelected.label(),
+        ActionOrigin::AstraSelected.label(),
         ActionOrigin::Fixture.label(),
         ActionOrigin::Manual.label(),
         ActionOrigin::SafetyReflex.label(),
@@ -183,8 +272,8 @@ fn the_four_labels_are_exact_and_distinct() {
     let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
     assert_eq!(
         unique.len(),
-        4,
-        "the origins must be distinguishable, not four spellings of one label"
+        labels.len(),
+        "the origins must be distinguishable"
     );
 }
 
@@ -276,7 +365,12 @@ fn a_fixture_session_labels_its_recorded_rows_the_way_the_timeline_shows_them() 
 #[test]
 fn an_operator_takeover_is_labelled_manual_in_the_engine_recorded_events() {
     let engine = connect_fixture();
-    engine.send(manual_wait(&engine.snapshot()));
+    let offered = wait_for(&engine, "the fixture's offered manual waypoint", |view| {
+        view.manual_candidates
+            .iter()
+            .any(|candidate| candidate.id.starts_with("waypoint_"))
+    });
+    engine.send(manual_waypoint(&offered));
     let view = wait_for(&engine, "recorded manual action", |view| {
         count(view, "action") == 1
     });

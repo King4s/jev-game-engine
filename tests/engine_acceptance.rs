@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use jev_game_engine::{engine::EngineHandle, model::*};
 
 fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) -> bool) -> View {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    // A hang detector, not a measurement: a loaded machine needs wall-clock slack, and a tight
+    // bound here would make the test machine decide the test outcome.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let view = engine.snapshot();
         if predicate(&view) {
@@ -22,7 +24,9 @@ fn wait_for(engine: &EngineHandle, description: &str, predicate: impl Fn(&View) 
 
 /// Negative assertions must cover the delayed fixture response, not one snapshot.
 fn remains(engine: &EngineHandle, predicate: impl Fn(&View) -> bool) {
-    let deadline = Instant::now() + Duration::from_millis(450);
+    // Negative assertions must cover more than one fixture tick, and the window must not shrink
+    // on a busy machine: it is the fixture's own clock that should decide when the check is done.
+    let deadline = Instant::now() + Duration::from_millis(1_000);
     loop {
         let view = engine.snapshot();
         assert!(predicate(&view), "Unexpected later state: {view:?}");
@@ -46,11 +50,34 @@ fn count(view: &View, kind: &str) -> usize {
     view.events.iter().filter(|e| e.kind == kind).count()
 }
 
-fn manual_wait(view: &View) -> Command {
+/// A manual takeover has to pick a choice the candidate generator actually offered. The engine
+/// offers no `wait` candidate any more, and it refuses a manual action that is not among the
+/// candidates it derives from the current observation, so the takeover navigates to the
+/// fixture's waypoint instead of standing still.
+fn manual_takeover(view: &View) -> Command {
+    let candidate = view
+        .manual_candidates
+        .iter()
+        .find(|candidate| candidate.id.starts_with("waypoint_"))
+        .expect("the fixture observation offers a waypoint to navigate to")
+        .clone();
+    Command::Manual {
+        candidate,
+        world_epoch: view.observation.as_ref().map_or(0, |o| o.world_epoch),
+        dimension: view.observation.as_ref().and_then(|o| o.dimension.clone()),
+    }
+}
+
+/// A replayed recording offers no manual choices at all: `View::manual_candidates` is empty
+/// while a replay is loaded, so the only manual command a replay can receive is one the engine
+/// refuses. Sending a refused command is the point of the replay test — the recording must not
+/// change whether or not the command could ever have been legal.
+fn manual_command_a_replay_refuses(view: &View) -> Command {
     Command::Manual {
         candidate: Candidate {
-            id: "wait".into(),
-            description: "Wait without moving".into(),
+            skill: None,
+            id: "waypoint_0".into(),
+            description: "A choice a replay never offers".into(),
             target: None,
             duration_ms: view.goal_ms,
         },
@@ -163,7 +190,7 @@ fn time_budget_stops_active_goal_and_rejects_manual_execution() {
     });
     let actions = count(&stopped, "action");
     assert_eq!(actions, 1);
-    engine.send(manual_wait(&engine.snapshot()));
+    engine.send(manual_takeover(&engine.snapshot()));
     remains(&engine, |v| {
         count(v, "action") == actions && v.active_goal.is_none()
     });
@@ -173,7 +200,7 @@ fn time_budget_stops_active_goal_and_rejects_manual_execution() {
 fn manual_takeover_cancels_pending_model_and_records_separate_origin() {
     let engine = connect(Settings::default());
     pending(&engine);
-    engine.send(manual_wait(&engine.snapshot()));
+    engine.send(manual_takeover(&engine.snapshot()));
     let view = wait_for(&engine, "manual action", |v| count(v, "action") == 1);
     let event = view.events.iter().find(|e| e.kind == "action").unwrap();
     assert!(event.message.contains("Manual action; mixed control"));
@@ -211,7 +238,7 @@ fn replay_is_immutable_even_when_play_and_manual_commands_are_sent() {
     let events = serde_json::to_value(&replay.events).unwrap();
     engine.send(Command::Start);
     engine.send(Command::Step);
-    engine.send(manual_wait(&engine.snapshot()));
+    engine.send(manual_command_a_replay_refuses(&engine.snapshot()));
     remains(&engine, |v| {
         v.replay
             && v.requests == 1

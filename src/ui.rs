@@ -216,6 +216,11 @@ impl GameApp {
                     "Engine safety reflex (engine-initiated flight goals)",
                 );
             });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.settings.wood_skills, "Wood skills (gather logs and craft planks/tables; opt-in)");
+                ui.label("Permitted wood dimension");
+                ui.text_edit_singleline(&mut self.settings.allowed_dimension);
+            });
             ui.checkbox(&mut self.settings.legacy_forwarding, "Legacy forwarding for an authorized bot server");
             let mut reachable = self.settings.fixture_waypoint == FixtureWaypoint::Reachable;
             if ui
@@ -326,6 +331,7 @@ impl GameApp {
                     ui.label(item);
                 }
             });
+            wood_status(ui, obs, view);
         } else {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_min_height(180.0);
@@ -511,6 +517,77 @@ impl GameApp {
             ui.label(format!("Recording: {path}"));
         }
         ui.small("Replay shows recorded telemetry without a game connection or model requests. It does not recreate the world.");
+    }
+}
+
+fn wood_status(ui: &mut egui::Ui, observation: &Observation, view: &View) {
+    ui.separator();
+    let source = if view.replay {
+        "recorded observation"
+    } else if view.mode == Mode::Demo {
+        "offline fixture"
+    } else if !observation.connected {
+        "live mode · last disconnected observation"
+    } else {
+        "live observation"
+    };
+    ui.label(RichText::new(format!("Wood status · {source}")).color(ACCENT));
+    if view.mode == Mode::Demo && !view.replay {
+        ui.small("The offline fixture does not inspect Minecraft trees or item drops.");
+    } else if observation.trees.is_empty() {
+        ui.small("No bounded tree components reported in this observation.");
+    }
+    for tree in &observation.trees {
+        ui.label(format!(
+            "Tree {} · {} · {} reported logs · {} verified harvest options",
+            tree.id,
+            tree.wood,
+            tree.logs.len(),
+            tree.next.len()
+        ));
+        ui.small(&tree.status);
+        let diagnostics = &tree.diagnostics;
+        if tree.capacity_loss {
+            ui.colored_label(WARNING, "Tree memory capacity lost unresolved wood or access; harvest blocked for this world epoch.");
+        }
+        if diagnostics.unknown_visibility {
+            ui.small("Visibility incomplete: scan boundary, missing sightline, or unresolved remembered wood. Hidden cells are unknown.");
+        }
+        for (count, reason) in [
+            (
+                diagnostics.stance_or_route,
+                "no verified mining stance or route",
+            ),
+            (
+                diagnostics.support_or_upper_log,
+                "reserved support or higher observed log",
+            ),
+            (diagnostics.memory_veto, "remembered access dependency"),
+        ] {
+            if count > 0 {
+                ui.small(format!("{count} rejected option(s): {reason}."));
+            }
+        }
+    }
+    if let Some(drop) = &observation.recoverable_drop {
+        ui.colored_label(
+            WARNING,
+            format!("Recoverable drop observed: {} · verified return route available; collection still needs inventory confirmation.", drop.log),
+        );
+    }
+    if let Some(outcome) = &observation.skill_outcome {
+        let result = if outcome.success && outcome.confirmed_by_server {
+            "server-confirmed success"
+        } else if outcome.success {
+            "reported success; server confirmation absent"
+        } else {
+            "failed or cancelled"
+        };
+        ui.label(format!(
+            "Last skill attempt {} · {} · {} · world epoch {}",
+            outcome.attempt_id, outcome.candidate_id, result, outcome.world_epoch
+        ));
+        ui.small(&outcome.message);
     }
 }
 
@@ -711,6 +788,7 @@ mod tests {
         let observation = Observation {
             sequence: 7,
             world_epoch: 1,
+            deaths: 0,
             dimension: Some("fixture:overworld".into()),
             connected: true,
             position: Position {
@@ -731,6 +809,7 @@ mod tests {
             }],
             entities: vec![],
             note: "Synthetic offline fixture; no Minecraft connection".into(),
+            ..Default::default()
         };
         View {
             status: "Connected".into(),
@@ -743,6 +822,7 @@ mod tests {
                 message: "Offline fixture decision".into(),
                 observation: Some(observation),
                 candidates: vec![Candidate {
+                    skill: None,
                     id: "wait".into(),
                     description: "Wait at the observed position".into(),
                     target: None,

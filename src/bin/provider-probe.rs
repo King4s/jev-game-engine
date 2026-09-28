@@ -15,6 +15,7 @@ async fn main() -> Result<()> {
     };
     let observation = Observation {
         world_epoch: 1,
+        deaths: 0,
         dimension: Some("fixture:overworld".into()),
         sequence: 1,
         connected: false,
@@ -29,15 +30,18 @@ async fn main() -> Result<()> {
         blocks: vec![],
         entities: vec![],
         note: "Synthetic API contract probe. No game is connected; movement must not occur.".into(),
+        ..Observation::default()
     };
     let candidates = vec![
         Candidate {
+            skill: None,
             id: "stop".into(),
             description: "Stop because no game is connected".into(),
             target: None,
             duration_ms: 1_000,
         },
         Candidate {
+            skill: None,
             id: "wait".into(),
             description: "Wait without movement for a connection".into(),
             target: None,

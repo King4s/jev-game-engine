@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -13,7 +15,25 @@ pub struct Landmark {
     pub position: Position,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A useful block or animal near the bot, reported as one of the nearest of its kind.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Resource {
+    /// Survival category, for example `log`, `iron_ore`, `bed` or `sheep`.
+    pub kind: String,
+    /// Registry id of the block or entity, for example `minecraft:oak_log`.
+    pub name: String,
+    pub position: Position,
+    /// Distance in blocks from the observed bot position to `position`.
+    pub distance_m: f64,
+}
+
+/// `Default` exists so code that builds an observation can name only the fields it
+/// knows; the default is a disconnected, empty observation, never a plausible world.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Observation {
     /// Adapter-local world lifecycle; changes even on same-dimension respawn.
     #[serde(default)]
@@ -21,6 +41,11 @@ pub struct Observation {
     /// Server-reported dimension identifier; absent in legacy recordings.
     #[serde(default)]
     pub dimension: Option<String>,
+    /// Deaths the adapter has seen this connection. Monotonic, so a death survives even
+    /// when the respawn observation replaces the dying one before the engine reads it;
+    /// absent (zero) in older recordings.
+    #[serde(default)]
+    pub deaths: u64,
     pub sequence: u64,
     pub connected: bool,
     pub position: Position,
@@ -28,16 +53,108 @@ pub struct Observation {
     pub food: f32,
     pub inventory: Vec<String>,
     pub blocks: Vec<Landmark>,
+    /// Current visible native state facts, capped at 16; absent in legacy recordings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_facts: Vec<crate::perception::BlockFacts>,
     pub entities: Vec<Landmark>,
+    /// Bounded native entity scan omitted possible actors; absence is not evidence of safety.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub entity_scan_incomplete: bool,
     pub note: String,
+    /// Tick within the 24,000-tick day cycle, as last sent by the server. `None` until
+    /// the server has sent the time, and in recordings made before it was observed.
+    #[serde(default)]
+    pub time_of_day: Option<u64>,
+    /// Registry id of the item in the selected hotbar slot; `None` when the hand is
+    /// empty or the inventory is unknown.
+    #[serde(default)]
+    pub held_item: Option<String>,
+    /// Inventory totals by registry item id, for example `minecraft:oak_log: 12`.
+    #[serde(default)]
+    pub items: BTreeMap<String, u32>,
+    /// Nearest useful blocks and animals, at most three per kind, sorted by distance.
+    #[serde(default)]
+    pub resources: Vec<Resource>,
+    #[serde(default)]
+    pub trees: Vec<crate::wood_tree::TreeView>,
+    /// Fresh, visible item and reversible route after an interrupted gather.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverable_drop: Option<RecoverableDrop>,
+    /// Packet-confirmed idle player inventory; absent for legacy/unknown/busy menus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crafting_inventory: Option<Vec<CraftingSlot>>,
+    /// Adapter-observed terminal result; never a navigation arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_outcome: Option<SkillOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RecoverableDrop {
+    pub log: String,
+    pub position: Position,
+    pub route: Vec<Position>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Candidate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<WoodSkill>,
     pub id: String,
     pub description: String,
     pub target: Option<Position>,
     pub duration_ms: u64,
+}
+
+/// Fully bound, opt-in wood operation. Gather targets are exact log centers; crafting has no world target.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WoodSkill {
+    CraftPlanks {
+        log: String,
+        planks: String,
+    },
+    CraftTable {
+        planks: [String; 4],
+    },
+    PlaceTable {
+        support: Position,
+        source_slot: u16,
+        hotbar_slot: u8,
+    },
+    Gather {
+        log: String,
+        approach: Position,
+        #[serde(default)]
+        route: Vec<Position>,
+    },
+    RecoverDrop {
+        log: String,
+        route: Vec<Position>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CraftingSlot {
+    pub slot: u16,
+    pub item: String,
+    pub count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SkillOutcome {
+    /// Unique dispatch attempt; zero in legacy recordings.
+    #[serde(default)]
+    pub attempt_id: u64,
+    pub candidate_id: String,
+    pub world_epoch: u64,
+    pub success: bool,
+    #[serde(default)]
+    pub confirmed_by_server: bool,
+    pub message: String,
+}
+
+fn default_allowed_dimension() -> String {
+    "minecraft:overworld".into()
 }
 
 /// Engine-side arrival tolerance, in blocks, between the observed bot position and
@@ -87,8 +204,17 @@ pub enum FixtureWaypoint {
     Reachable,
 }
 
+fn default_route_min_confidence() -> f64 {
+    0.5
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    /// Explicit permission for bounded log gathering and inventory crafting in the permitted dimension.
+    #[serde(default)]
+    pub wood_skills: bool,
+    #[serde(default = "default_allowed_dimension")]
+    pub allowed_dimension: String,
     #[serde(default)]
     pub legacy_forwarding: bool,
     /// Absent in recordings written before the offline demo could choose its geometry.
@@ -110,6 +236,11 @@ pub struct Settings {
     /// action ends. Pacing bounds provider spend over a long session.
     #[serde(default)]
     pub request_interval_ms: u64,
+    /// Minimum handler confidence this run accepts before it will act. Jev Route sets the
+    /// floor per run; 0.5 is the previous fixed policy and remains the default, so a run
+    /// that says nothing behaves exactly as before.
+    #[serde(default = "default_route_min_confidence")]
+    pub route_min_confidence: f64,
     /// Opt-in engine safety reflex: when a hostile entity is inside the reflex radius
     /// and no navigation goal is in flight, the engine stops the session's in-flight
     /// work and dispatches one bounded flight goal itself, recorded with the
@@ -122,6 +253,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            wood_skills: false,
+            allowed_dimension: default_allowed_dimension(),
             legacy_forwarding: false,
             fixture_waypoint: FixtureWaypoint::Distant,
             mode: Mode::Demo,
@@ -131,6 +264,7 @@ impl Default for Settings {
             max_seconds: 300,
             objective: String::new(),
             request_interval_ms: 0,
+            route_min_confidence: default_route_min_confidence(),
             safety_reflex: false,
         }
     }
@@ -161,6 +295,8 @@ pub struct Recording {
 
 #[derive(Clone, Debug)]
 pub struct View {
+    /// Recording identity for session-scoped telemetry counts.
+    pub session_id: Option<String>,
     /// Current legal manual choices, bound to this snapshot's observation.
     pub manual_candidates: Vec<Candidate>,
     pub status: String,
@@ -170,9 +306,29 @@ pub struct View {
     pub requests: u32,
     pub active_goal: Option<String>,
     pub last_error: Option<String>,
+    /// Why the last chosen action was not executed, recorded verbatim the way `last_error`
+    /// records an end reason — but a refusal is a technical answer, not a verdict on the run,
+    /// so it is kept out of `last_error`, which names the reason a session stopped and is what
+    /// the harness classifies. The run goes on and the concrete check stays readable (see
+    /// `refusal::Refusal`).
+    pub last_refusal: Option<String>,
+    /// Chosen actions the local guard refused, each one recorded as `rejected` with the check
+    /// that refused it. Counted like `rejected_answers`, so a run says how much work the
+    /// engine could not carry out instead of leaving it in the recording alone.
+    pub refused_actions: u32,
     pub recording_path: Option<String>,
     pub p50_ms: Option<u64>,
     pub p95_ms: Option<u64>,
+    /// Measured p95 answer time of the world peer (client and adapter), once any action has
+    /// been acknowledged. Reported so a run states the budget it actually used.
+    pub client_p95_ms: Option<u64>,
+    /// Budget derived from that measurement for acknowledging a dispatched action. Never a
+    /// constant tuned to one connection: it is what this run measured.
+    pub client_action_budget_ms: u64,
+    /// Budget for observing the world, derived from the interval this adapter was measured
+    /// to publish at (never from the action acknowledgement, which measures a different
+    /// stream). Reported beside the client budget because a run judges both.
+    pub observation_budget_ms: u64,
     pub goal_ms: u64,
     pub answer_age_limit_ms: u64,
     pub replay: bool,
@@ -181,11 +337,14 @@ pub struct View {
     /// Engine safety-reflex actions dispatched in this session, each one recorded with
     /// its own origin. Distinguishes engine-initiated flight from model choices.
     pub reflexes: u32,
+    /// Model answers that arrived but failed validation; dropped without acting.
+    pub rejected_answers: u32,
 }
 
 impl Default for View {
     fn default() -> Self {
         Self {
+            session_id: None,
             manual_candidates: vec![],
             status: "Ready".into(),
             mode: Mode::Demo,
@@ -194,14 +353,20 @@ impl Default for View {
             requests: 0,
             active_goal: None,
             last_error: None,
+            last_refusal: None,
+            refused_actions: 0,
             recording_path: None,
             p50_ms: None,
             p95_ms: None,
+            client_p95_ms: None,
+            client_action_budget_ms: 1_000,
+            observation_budget_ms: 1_000,
             goal_ms: 2000,
             answer_age_limit_ms: 1500,
             replay: false,
             objective: String::new(),
             reflexes: 0,
+            rejected_answers: 0,
         }
     }
 }

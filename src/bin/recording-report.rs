@@ -3,9 +3,10 @@
 //! Minecraft connection and never mutates the recording.
 use anyhow::{Context, Result};
 use jev_game_engine::{
-    model::Event,
+    model::{Event, Observation},
     origin::{ActionOrigin, event_origin},
     recording,
+    resources::nearest_per_kind,
 };
 use std::collections::BTreeMap;
 
@@ -95,7 +96,26 @@ fn main() -> Result<()> {
         )
     };
 
+    // What the bot last saw while connected: the Survival level-0 view.
+    let last_seen = recording
+        .events
+        .iter()
+        .rev()
+        .filter_map(|event| event.observation.as_ref())
+        .find(|observation| observation.connected);
+
     if as_json {
+        let last_observation = last_seen.map(|observation| {
+            serde_json::json!({
+                "sequence": observation.sequence,
+                "time_of_day": observation.time_of_day,
+                "health": observation.health,
+                "food": observation.food,
+                "held_item": observation.held_item,
+                "items": observation.items,
+                "nearest_resources": nearest_per_kind(&observation.resources),
+            })
+        });
         let arrived_details: Vec<String> = arrived.iter().map(|event| describe(event)).collect();
         println!(
             "{}",
@@ -119,6 +139,7 @@ fn main() -> Result<()> {
                 "expired_with_target": expired_with_target,
                 "target_less": target_less,
                 "arrived_details": arrived_details,
+                "last_connected_observation": last_observation,
                 "validation": "passed",
             })
         );
@@ -171,6 +192,10 @@ fn main() -> Result<()> {
                 }
             }
         }
+        match last_seen {
+            Some(observation) => print_survival_view(observation),
+            None => println!("Last connected observation: none"),
+        }
         println!(
             "Validation: passed. No provider call and no Minecraft connection was made, and the \
              recording was not modified."
@@ -182,6 +207,48 @@ fn main() -> Result<()> {
         std::process::exit(3);
     }
     Ok(())
+}
+
+/// Text lines for the last connected observation's Survival level-0 view.
+fn print_survival_view(observation: &Observation) {
+    let sequence = observation.sequence;
+    let time = match observation.time_of_day {
+        Some(ticks) => format!("tick {ticks} of 24000"),
+        None => "unknown".to_string(),
+    };
+    let food = observation.food;
+    let health = observation.health;
+    let held = observation.held_item.as_deref().unwrap_or("nothing");
+    println!(
+        "Last connected observation #{sequence}: time of day {time} · health {health} · food {food} · held item {held}"
+    );
+    if observation.items.is_empty() {
+        println!("  Items: none");
+    } else {
+        let items: Vec<String> = observation
+            .items
+            .iter()
+            .map(|(item, count)| format!("{item} {count}"))
+            .collect();
+        println!("  Items: {}", items.join(", "));
+    }
+    let nearest = nearest_per_kind(&observation.resources);
+    if nearest.is_empty() {
+        println!("  Nearest resources: none");
+    } else {
+        println!("  Nearest resource per kind:");
+        for resource in nearest {
+            let (x, y, z) = (
+                resource.position.x,
+                resource.position.y,
+                resource.position.z,
+            );
+            println!(
+                "    {} {} at ({x:.1}, {y:.1}, {z:.1}), {:.1} m",
+                resource.kind, resource.name, resource.distance_m
+            );
+        }
+    }
 }
 
 /// The events that lead to one verdict, correlated by order rather than by message text: the

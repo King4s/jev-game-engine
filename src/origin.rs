@@ -4,9 +4,9 @@
 //! readable without guessing: an operator takeover announces itself in the recorded message, an
 //! `offline-fixture` model identity means the offline fixture answered, a `SAFETY-REFLEX`
 //! message means the engine's opt-in safety reflex dispatched a bounded flight goal without a
-//! model request, and any other model decision on a decision, dispatch, action or executor
-//! event means the configured model selected the goal. Events that carry none of these record
-//! no origin.
+//! model request, and a decision's model identity distinguishes Jev, Jev Router and historical
+//! Astra choices. An accepted action's recorded message retains the Jev or router origin when
+//! that row has no decision. Events that carry none of these record no origin.
 //!
 //! This lives in the library rather than in the desktop UI so the timeline and the offline
 //! recording report label the same events the same way, and so a test can assert the separation
@@ -19,6 +19,10 @@ use crate::model::Event;
 pub enum ActionOrigin {
     /// A goal the configured model selected.
     JevSelected,
+    /// Jev Router selected the bounded action after Jev delegated to it.
+    RouterSelected,
+    /// Astra selected the action after Jev selected the handler.
+    AstraSelected,
     /// A goal the offline fixture's synthetic decision path selected.
     Fixture,
     /// An action the operator took over manually.
@@ -34,6 +38,8 @@ impl ActionOrigin {
     pub fn label(self) -> &'static str {
         match self {
             Self::JevSelected => "JEV-SELECTED",
+            Self::RouterSelected => "JEV-ROUTER-SELECTED",
+            Self::AstraSelected => "ASTRA-SELECTED",
             Self::Fixture => "FIXTURE",
             Self::Manual => "MANUAL",
             Self::SafetyReflex => "SAFETY-REFLEX",
@@ -56,11 +62,42 @@ pub fn event_origin(event: &Event) -> Option<ActionOrigin> {
     if event.kind == "reflex" || event.message.contains("SAFETY-REFLEX") {
         return Some(ActionOrigin::SafetyReflex);
     }
+    if event.kind == "action"
+        && event
+            .message
+            .contains("Astra selected goal; local executor")
+    {
+        return Some(ActionOrigin::AstraSelected);
+    }
+    if event.kind == "action"
+        && event
+            .message
+            .contains("Jev Router selected goal; local executor")
+    {
+        return Some(ActionOrigin::RouterSelected);
+    }
+    if event.kind == "action"
+        && event.decision.is_none()
+        && event.message.contains("Jev selected goal; local executor")
+    {
+        return Some(ActionOrigin::JevSelected);
+    }
     let decision = event.decision.as_ref()?;
     if decision.model == "offline-fixture" {
         return Some(ActionOrigin::Fixture);
     }
     match event.kind.as_str() {
+        "decision" | "dispatched" | "action" | "executor"
+            if decision.model == crate::routing::ASTRA_MODEL
+                || decision.model.starts_with("gpt-6-astra-") =>
+        {
+            Some(ActionOrigin::AstraSelected)
+        }
+        "decision" | "dispatched" | "action" | "executor"
+            if decision.model == crate::routing::JEV_ROUTER_MODEL =>
+        {
+            Some(ActionOrigin::RouterSelected)
+        }
         "decision" | "dispatched" | "action" | "executor" => Some(ActionOrigin::JevSelected),
         _ => None,
     }

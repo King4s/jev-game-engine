@@ -8,11 +8,13 @@
 use std::{collections::BTreeMap, process::Command};
 
 use jev_game_engine::model::{
-    Candidate, Decision, Event, FixtureWaypoint, Mode, Recording, Settings,
+    ArrivalVerdict, Candidate, Decision, Event, FixtureWaypoint, Mode, Position, Recording,
+    Settings,
 };
 
 fn candidate(id: &str) -> Candidate {
     Candidate {
+        skill: None,
         id: id.into(),
         description: format!("candidate {id}"),
         target: None,
@@ -174,4 +176,55 @@ fn a_recording_without_a_reflex_reports_zero_and_keeps_its_answer_count() {
     assert_eq!(summary["answers"], 1);
     assert_eq!(summary["reflex_actions"], 0);
     assert_eq!(summary["reflex_events"], 0);
+}
+
+#[test]
+fn the_report_chain_labels_a_jev_router_choice_and_accepted_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("router.json");
+    let mut recording = recording_with_one_answer_and_one_reflex();
+    recording.id = "router-report-test".into();
+    recording.settings.mode = Mode::Live;
+    recording.events.truncate(4);
+    for row in &mut recording.events {
+        if let Some(decision) = &mut row.decision {
+            decision.model = "typesafe/jev-router".into();
+        }
+        if row.kind == "dispatched" || row.kind == "action" {
+            row.message = format!("Jev Router selected goal; local executor; {}", row.message);
+        }
+    }
+    let mut arrived = event(
+        5,
+        "executor",
+        "Local executor: target reached",
+        vec![],
+        None,
+    );
+    arrived.arrival = Some(ArrivalVerdict {
+        target: Some(Position {
+            x: 1.0,
+            y: 64.0,
+            z: 1.0,
+        }),
+        measured_distance_m: Some(0.1),
+        tolerance_m: 0.5,
+        duration_ms: 2_000,
+        elapsed_ms: 100,
+        arrived: true,
+    });
+    recording.events.push(arrived);
+    jev_game_engine::recording::validate(&recording).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&recording).unwrap()).unwrap();
+
+    let (code, output) = report(&[path.to_str().unwrap(), "--chain"]);
+    assert_eq!(code, 0, "{output}");
+    for kind in ["decision:", "dispatched:", "action:"] {
+        assert!(
+            output
+                .lines()
+                .any(|line| line.contains("JEV-ROUTER-SELECTED") && line.contains(kind)),
+            "missing router origin on {kind}: {output}"
+        );
+    }
 }

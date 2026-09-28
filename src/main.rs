@@ -42,6 +42,16 @@ fn main() -> eframe::Result {
                     number(&mut args, "--request-interval-seconds", 0, 86_400) * 1_000
             }
             "--safety-reflex" => settings.safety_reflex = true,
+            "--wood-skills" => settings.wood_skills = true,
+            "--allowed-dimension" => {
+                settings.allowed_dimension = args
+                    .next()
+                    .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
+                    .unwrap_or_else(|| {
+                        eprintln!("--allowed-dimension requires a dimension registry id");
+                        std::process::exit(2)
+                    });
+            }
             "--port" => {
                 settings.port = args
                     .next()

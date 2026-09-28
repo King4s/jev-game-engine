@@ -8,6 +8,8 @@ Report fixtures, real game connections and real Jev inference separately. Missin
 
 ## Task 1: Define the Rust contract for goals and local execution
 
+**Standing requirement for all Minecraft tasks:** apply the [gameplay planning contract](minecraft-gameplay-contract.md), including dependencies, safe access/return, resource collection, interruption/recovery and independently verifiable outcomes. The Level 1 scenarios there remain pending; neither this checklist nor passing primitive tests establishes gameplay completion.
+
 **Description:** Turn research and the approved macro architecture into concrete contracts and version choices.
 **Acceptance:**
 
@@ -86,7 +88,7 @@ Report fixtures, real game connections and real Jev inference separately. Missin
 - [ ] Show confidence/probabilities/usage only when returned; invent no explanations.
 - [ ] Invalid responses and missing keys produce concrete errors without hidden test fallback.
 
-**Verification:** Provider contract tests and one budget-limited real Jev call when credentials are available.
+**Verification:** Provider contract tests and one budget-limited real Jev call when credentials are available. Status 2026-09-27: that live call is recorded from the test-server run in `runs/level1-resume/live-turn23.json` — two `model_stage` requests for `jev-latest` (4,935 input and 107 output tokens, 299ms), one blocked, and a `model_route` row whose handler choice was `astra` at confidence 0.02 with reason "Jev handler judgment is uncertain", so no action was executed. The escalation call to `typesafe/jev-router` remains unverified, no complete autonomous Minecraft Level 1 wood sequence has been proven, and offline checks or accepted actions are not gameplay proof.
 **Dependencies:** 5. **Size:** M.
 **Files:** `src/providers/jev.rs`, `tests/jev_contract.rs`, selected decision view, `src/main.rs`.
 
@@ -194,3 +196,23 @@ The operator wants to see Jev and LLM usage as small graphs **while watching the
 - [ ] Graphs to show, each as a sparkline over the last N requests: requests per minute against the pacing setting, answer latency (p50/p95 lines), tokens per request (input and output), the running share of `wait` versus navigation versus `flee` answers, and reflex actions as marks on the time axis. Numbers come from recorded events, so the overlay and a recording replay show the same series.
 - [ ] Keep the overlay read-only: no controls that could send a command from a window the operator cannot see clearly, and no API key or private identifier on screen.
 - [ ] Offline evidence: a headless egui test renders the overlay from a fixture recording; a screenshot from the fixture session documents it. Live evidence is a screenshot over the real client, labelled as such.
+
+## Task 14: Act on Jev's probabilities, not only its top choice (requested 2026-09-26, not started)
+
+Today the engine dispatches `decision.choice`, the single most likely candidate, and keeps the returned `probabilities` only for display. Every live session so far has been dominated by `wait` (the demo answered `wait` at 77.0% against 12.0% for the strongest waypoint; the autonomous run answered `wait` 9 times out of 9). *Just Ask Jev* (Guo et al., 2026, arXiv:2609.29429; code and benchmark: https://github.com/sumleo/RLCDAlignBench, MIT) reports that reading Jev's answers as calibrated probabilities instead of argmax decisions matters a lot, that question wording adds little out of sample, and that context helps mostly through fields that encode the label. Only the first finding is a design input here; the paper measures alignment-failure detection, not game control, so nothing below assumes its numbers transfer.
+
+- [ ] Add an explicit, recorded selection policy to `Settings`: `argmax` (today's behaviour, the default) and `threshold`, which dispatches the most likely **non-wait** candidate when its probability reaches a configurable threshold and otherwise waits. The policy and threshold go into the recording, and every dispatch records which rule chose it and the probability it used, so `JEV-SELECTED` still means the model's distribution drove the action.
+- [ ] Keep safety local and unchanged: the policy only chooses among the bounded candidates the engine already validated; the reflex, Stop, budgets and acknowledgement deadlines do not depend on it.
+- [ ] Do not tune the objective wording to change behaviour; per the paper's out-of-sample result, treat prompt wording as a weak lever and measure the policy instead.
+- [ ] Keep the observation free of fields that hint at the "right" answer (the paper's context finding), so a better-looking policy is not an artefact of leaked labels.
+- [ ] Offline evidence: unit tests for both policies on fixed distributions (below, at and above threshold; ties; a distribution without a non-wait candidate), and a fixture session showing a threshold dispatch in the timeline and in `recording-report`.
+- [ ] Live evidence: one budgeted `session-run` per policy on the test server with the same objective and pacing, compared by `recording-report` (answers, dispatched non-wait goals, arrival verdicts). Report both, including if the threshold policy moves the bot no more than argmax does.
+- [ ] Credit the paper and repository in README's credits when the feature ships.
+
+## Task 15: Real cover from shooters (operator rules, 2026-09-26, not started)
+
+Operator's rules from the first Survival night run: the only real cover is **inside a room whose door is closed behind the bot**, and a large room only counts if it is **lit everywhere** (otherwise mobs spawn inside). Prior art: Minecraft Wiki (Skeleton: shoots within 15 blocks only with a clear line of sight; blocks stop arrows); no surveyed bot project (mindcraft, Voyager, mineflayer-pvp, azalea examples, the Jev Minecraft repos) implements door- or light-based shelter, so this would be new.
+
+- [ ] Adapter capabilities first: observe doors (position, open/closed) and block light levels in the observed area; a bounded `use door` action that opens and closes a door, acknowledged like any other action.
+- [ ] A shelter candidate: an enclosed room reachable within the goal bound, every standable cell at a light level where hostile mobs cannot spawn, door closed after entry; offered to Jev and preferred by the reflex over running when a shooter is in range.
+- [ ] Offline tests on fixture rooms (lit/unlit, open/closed door, too far); live evidence in the test world, labelled as such.
