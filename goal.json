@@ -1,40 +1,37 @@
 {
-  "goal": "Repair one concrete Minecraft execution path under Jev-AI-Skill: make observed game mode and abilities explicit, identify and fix why the recorded block-break attempts never changed the server world, and prove correct Creative block removal and Survival resource collection through shared mechanics. This is a bounded repair stage, not completion of the open-world agent. The governing vision remains F:/AI-Projekter/ai-game-engine/docs/ai-instruktion-minecraft-engine.md; the execution handoff is F:/AI-Projekter/ai-game-engine/docs/ai-naeste-opgave.md. All 15 prior acceptance criteria are preserved as outstanding broader requirements in F:/AI-Projekter/ai-game-engine/.claude/worktrees/jev-skill-model-subagent-8ceca5/tasks/product-requirements-2026-09-28.json; they are not silently completed by this stage. Previous loop 20260927-234036 stopped with escalate and is historical. Use the installed Jev skill: Loop owns roles/checks/review/stop, Route owns model/skill/delegation choices per execute. Verify the configuration returned by loop_start against this file before implementation. Do not edit an active goal file and claim its loaded cfg changed. Preserve existing Rust/Azalea code and operator work; no broad rewrite or library migration without a minimal reproducer. Current evidence: live-dt.json contains five failed gather attempts with no removed block; live-survival.json contains eight wait choices and an operator-given axe, and its setup did not confirm the player mode. These are failed/assisted diagnostic records, not working harvest. Keep Jev responsible for gameplay strategy and retain the LLM knowledge, evolving goals, building and preservation requirements for later stages.",
+  "goal": "Build a Rust AI Game Engine and native Rust desktop UI for Windows. Minecraft Java is the first real game adapter, controlled by TypeSafe Jev. Farming Simulator 25 is the next documented adapter, not this MVP. No 2048 or Snake, no TypeScript engine. Use Rust egui/eframe UI and native Rust Minecraft protocol client (Azalea with pinned compatible toolchain/version). A clearly labelled deterministic Minecraft fixture is allowed for offline tests only. Follow revised tasks/plan.md. User refinement: reusable for other people, not personal-only. Jev selects multi-second goals, Rust executes locally. Adapt decision cadence and bounded goal duration from measured end-to-end latency so low- and high-latency users can benefit; show actual latency and responsibility clearly.",
   "acceptance": [
-    "Observation, decision input and saved recordings expose the actual observed player game mode and relevant observed abilities, with explicit unknown values and correct refresh after world/mode changes. World name, objective text and recording filename never stand in for mode evidence. Old recordings remain readable with unknown mode rather than fabricated values; client/server disagreement is visible.",
-    "The unchanged-block failure is traced through one controlled attempt: target and held item, local validation, actual mining request, outgoing action and server response, and independently confirmed final block state. Compare the pinned public Azalea mining API with the existing queued path when needed to distinguish integration failure from client restriction or server refusal. Apply and document the smallest evidence-supported fix. Simulation, packet send, local prediction and ACK alone cannot establish a successful live break or its cause.",
-    "The shared block-breaking path has correct mode-specific outcomes: Creative removal succeeds on an authoritative confirmed block change without requiring a Survival drop; Survival gather succeeds only after the promised valid drop is collected and reflected in authoritative inventory. Correct tool/drop prerequisites and cancellation on explicit stop, disconnect or invalid world identity remain enforced. There is no scene-specific coordinate script or unsupported promise of collection in Creative.",
-    "The relevant executable choice list contains only actions with real dispatch paths and honest outcome contracts. Unsupported goals remain visible as labelled knowledge outside the executable answer IDs; supported investigation/planning/acquisition paths remain possible. Wait and continuation remain legitimate choices. Do not force a desired Jev answer, silently lower thresholds, or repeatedly offer an unchanged impossible command just to spend another request.",
-    "Saved bounded live evidence confirms Creative removal and Survival collection under measured mode, world and stated initial conditions, and at least one integrated run shows real Jev choosing among several executable alternatives, the chosen action producing the confirmed effect, and the following decision using the updated state. A direct mechanical probe is allowed and labelled as such, but does not replace the Jev-choice evidence. Setup occurs before the autonomous segment; any later operator intervention is recorded and disqualifies that segment as autonomous proof. If prerequisites or a server/library defect block this, preserve the failed evidence and report the blocker through Loop; do not mark this criterion complete.",
-    "Meaningful regressions cover the proven cause, mode-specific outcomes and stop/stale-state behavior. The configured checks are run by Loop and pass; an independent review checks these criteria and the recorded effects, and its verdict is submitted unchanged. A short docs/chain-status.md records the current chain, new run ID/configuration, evidence paths/hashes, observed result and still-open broader requirements. Green tests alone are not gameplay completion."
+    "A documented cargo command starts the Rust desktop app with English game/session controls, start/pause/step/stop, connection settings, observed-world map, model decision panel and event timeline. Rust owns the engine, provider, adapter and UI; no Node or TypeScript runtime is required.",
+    "Live Jev uses the documented TypeSafe HTTP API with validation of bounded choices, probabilities/confidence/usage. Missing key, malformed responses, timeout and budget limits are visible; offline fixtures never masquerade as live Jev. Secrets stay out of logs, saved runs and UI.",
+    "A native Rust Minecraft adapter uses actual Azalea APIs with a pinned compatible Minecraft Java version and toolchain. It reads position, health, inventory and nearby observed entities/blocks and executes bounded actions with cancellation. Only loopback test servers are supported initially. No existing worlds, game installations, credentials or accounts are changed automatically.",
+    "Pause/stop/reset/disconnect invalidate pending model answers and release movement. Expired or obsolete responses cannot act. Sessions persist correlated observation/decision/action events; replay uses recorded telemetry and makes zero provider or Minecraft calls. External-world physics are not claimed deterministic.",
+    "cargo test, cargo check and cargo clippy --all-targets -- -D warnings pass with meaningful offline tests for provider validation, stale-answer races, budgets, adapter action bounds, persistence and replay. Native UI receives render/runtime smoke verification. Live Jev and Minecraft behavior are tested when prerequisites exist; exact missing prerequisites are documented honestly otherwise.",
+    "Independent fresh review checks acceptance and evidence, including responsive readable UI, unambiguous demo/live/replay labels and documented setup/limitations. README explains compatible Minecraft server setup, API key configuration and the next Farming Simulator 25 phase.",
+    "Latency policy adapts bounded goal/replan horizons to measured response times; low/high-latency offline tests verify bounds, freshness and immediate local stop. Settings contain no hardcoded personal paths. This is a reusable desktop MVP, not a hosted multi-user service."
   ],
-  "workdir": "F:/AI-Projekter/ai-game-engine/.claude/worktrees/jev-skill-model-subagent-8ceca5",
+  "workdir": ".",
   "checks": [
     "cargo test",
-    "cargo clippy --all-targets -- -D warnings",
-    "cargo fmt --check"
+    "cargo check",
+    "cargo clippy --all-targets -- -D warnings"
   ],
   "jev_model": "jev-latest",
   "jev_done_threshold": 0.8,
-  "max_turns": 20,
-  "max_consecutive_failures": 4,
+  "max_turns": 40,
+  "max_consecutive_failures": 6,
   "check_timeout": 900,
   "roles": {
     "build": {
-      "when": "Mode observation, outcome contracts or the shared mining integration is missing relative to this repair stage",
-      "brief": "Implement one coherent part of the shared repair using the existing Rust/Azalea code and documented pinned APIs. Preserve the open-world vision and existing technical checks. Write implementation/documentation, not tests. Follow Route for model/skill/delegation. Do not run configured checks; Loop runs them."
+      "when": "Implementation or required UI/documentation is missing relative to the goal",
+      "brief": "Implement one coherent vertical slice of working product. Delegate bounded independent components to subagents if useful, with explicit file ownership. Write implementation and documentation but do not write tests. Do not run configured checks; loop server runs them."
     },
     "test": {
-      "when": "A proven cause or acceptance criterion lacks meaningful regression coverage",
-      "brief": "Write focused regressions for the evidence-supported cause, observed/unknown game mode, Creative versus Survival results, truthful candidates and cancellation as relevant. Do not change product implementation or weaken outcome requirements. Follow Route. Do not run configured checks; Loop runs them."
+      "when": "Tests are missing or do not cover acceptance criteria",
+      "brief": "Write meaningful tests and test configuration for acceptance criteria, including deterministic offline provider/adapter fixtures and browser flows. Do not change product implementation. Do not run configured checks; loop server runs them."
     },
     "fix": {
-      "when": "Checks or independent review identify concrete failures or gaps",
-      "brief": "Read the authoritative failure/review evidence and fix its root cause with one focused change. Use only the skill-permitted smallest diagnostic when essential failure detail is missing; do not run confirmatory suites. Distinguish malformed setup, client restrictions, server refusal, prediction and real effects. Follow Route. Do not run configured checks; Loop runs them."
-    },
-    "verify": {
-      "when": "The live cause or repaired chain needs server-confirmed evidence",
-      "brief": "Use the existing authorized test environment for one bounded, named diagnostic or autonomous trial. Confirm actual mode/world and declared start state first. Record requests and server outcomes without credentials. Keep operator setup separate from the autonomous segment, and never change rules mid-run to manufacture success. Report failure honestly. Do not alter server permissions/configuration to bypass a refusal. Follow Route; Loop owns configured checks."
+      "when": "Checks or review fail with concrete errors or gaps",
+      "brief": "Read check/review evidence and fix root causes with focused changes, using bounded subagents if helpful. Preserve truthful separation of demo and live behavior. Do not run configured checks; loop server runs them."
     }
   }
 }
